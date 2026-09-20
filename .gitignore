@@ -25,6 +25,13 @@ dist/
 *.egg-info/
 .eggs/
 
+# Frontend dependencies and build output
+node_modules/
+.next/
+out/
+test-results/
+*.tsbuildinfo
+
 # Local environment and secrets
 .env
 .env.*
@@ -42,3 +49,6 @@ Thumbs.db
 
 # Logs
 *.log
+
+# Local project documents
+docs/
