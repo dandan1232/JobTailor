@@ -1,6 +1,6 @@
 # JobTailor
 
-JobTailor is a web workspace that turns a developer's real project experience into a job-specific resume strategy. The first version uses transparent local matching rules so the complete workflow can run without an AI key.
+JobTailor is a web workspace that analyzes an uploaded PDF or DOCX resume against a target job description, then returns evidence-based matching results and prioritized revision suggestions.
 
 ## Project structure
 
@@ -28,6 +28,18 @@ npm run dev
 ```
 
 Open `http://localhost:3000`.
+
+## AI configuration
+
+The complete workflow runs in local preview mode without a model key. To enable AI analysis, copy `.env.example` to `.env` and configure a Chat Completions-compatible provider:
+
+```text
+AI_BASE_URL=https://your-provider.example/v1
+AI_API_KEY=your-key
+AI_MODEL=your-model
+```
+
+Resume files are parsed in memory and are not stored by the backend. When AI mode is configured, extracted resume text and the pasted job description are sent to the configured model provider only after the user starts an analysis.
 
 ## Checks
 

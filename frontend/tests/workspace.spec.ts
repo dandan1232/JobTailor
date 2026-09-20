@@ -1,28 +1,32 @@
 import { expect, test } from "@playwright/test";
 
-test("analyzes a job description with the local API", async ({ page }) => {
+test("analyzes a resume against a job and accepts a revision", async ({ page }) => {
   await page.goto("/");
 
-  await expect(page.getByRole("heading", { name: "把真实经历，对准这个岗位" })).toBeVisible();
-  await expect(page.getByLabel("目标职位")).toHaveValue("Python 后端工程师");
+  await expect(page.getByRole("heading", { name: "让简历对准岗位，而不是堆关键词" })).toBeVisible();
+  await page.getByRole("button", { name: "载入示例" }).click();
+  await expect(page.getByText("示例-后端工程师简历.pdf")).toBeVisible();
 
-  await page.getByRole("button", { name: "分析岗位匹配" }).click();
+  await page.getByRole("button", { name: "开始匹配分析" }).click();
 
-  await expect(page.getByLabel("岗位匹配度 56 分")).toBeVisible();
-  await expect(page.getByText("Kubernetes", { exact: true })).toBeVisible();
-  await expect(page.getByText("目标岗位为Python 后端工程师", { exact: false })).toBeVisible();
+  await expect(page.getByRole("heading", { name: "岗位匹配诊断" })).toBeVisible();
+  await expect(page.getByText("本地分析预览")).toBeVisible();
+  await expect(page.getByRole("heading", { name: "按影响程度逐条处理" })).toBeVisible();
 
-  await page.getByRole("button", { name: "创建简历版本" }).click();
-  await expect(page.getByRole("button", { name: "简历版本已创建" })).toBeDisabled();
+  const summaryRevision = page.locator(".revision-item", { hasText: "让开头直接回应目标岗位" });
+  await summaryRevision.getByRole("button", { name: "采纳" }).click();
+  await expect(summaryRevision.getByText("已采纳")).toBeVisible();
+  await page.screenshot({ path: "../test-results/desktop-analysis.png", fullPage: true });
 });
 
-test("keeps the workflow usable on a mobile viewport", async ({ page }) => {
+test("keeps upload, JD input, and analysis controls usable on mobile", async ({ page }) => {
   await page.setViewportSize({ width: 390, height: 844 });
   await page.goto("/");
 
   await expect(page.getByRole("button", { name: "打开导航" })).toBeVisible();
-  await expect(page.getByLabel("目标职位")).toBeVisible();
-  await expect(page.getByRole("button", { name: "分析岗位匹配" })).toBeVisible();
+  await expect(page.locator("#source").getByText("上传简历", { exact: true })).toBeVisible();
+  await expect(page.getByLabel("目标岗位 JD")).toBeVisible();
+  await expect(page.getByRole("button", { name: "开始匹配分析" })).toBeDisabled();
 
-  await page.screenshot({ path: "../test-results/mobile.png", fullPage: true });
+  await page.screenshot({ path: "../test-results/mobile-upload.png", fullPage: true });
 });
