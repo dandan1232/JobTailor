@@ -1,6 +1,6 @@
 import { aiIsConfigured, Revision } from "@/lib/analysis";
 
-async function streamModel(prompt: string, finalize?: (content: string) => string): Promise<Response> {
+async function streamModel(prompt: string): Promise<Response> {
   if (!aiIsConfigured()) throw new Error("AI 服务尚未配置");
   const upstream = await fetch(`${process.env.AI_BASE_URL!.replace(/\/$/, "")}/chat/completions`, {
     method: "POST",
@@ -22,7 +22,6 @@ async function streamModel(prompt: string, finalize?: (content: string) => strin
   const decoder = new TextDecoder();
   const encoder = new TextEncoder();
   let buffer = "";
-  let generatedContent = "";
   const emitLine = (line: string, controller: ReadableStreamDefaultController<Uint8Array>) => {
     const trimmed = line.trim();
     if (!trimmed) return;
@@ -32,8 +31,7 @@ async function streamModel(prompt: string, finalize?: (content: string) => strin
       const chunk = JSON.parse(data) as { choices?: Array<{ delta?: { content?: string }; message?: { content?: string } }> };
       const content = chunk.choices?.[0]?.delta?.content ?? chunk.choices?.[0]?.message?.content;
       if (content) {
-        if (finalize) generatedContent += content;
-        else controller.enqueue(encoder.encode(content));
+        controller.enqueue(encoder.encode(content));
       }
     } catch {
       // Ignore keep-alive/non-JSON lines; a partial JSON chunk is handled by the provider's next line.
@@ -53,7 +51,6 @@ async function streamModel(prompt: string, finalize?: (content: string) => strin
         }
         buffer += decoder.decode();
         if (buffer) emitLine(buffer, controller);
-        if (finalize) controller.enqueue(encoder.encode(finalize(generatedContent)));
         controller.close();
       } catch (error) {
         controller.error(error);
@@ -65,25 +62,42 @@ async function streamModel(prompt: string, finalize?: (content: string) => strin
   return new Response(stream, { headers: { "Content-Type": "text/plain; charset=utf-8", "Cache-Control": "no-cache, no-transform", "X-Accel-Buffering": "no" } });
 }
 
-function applyAcceptedRevisions(original: string, revisions: Revision[]): string {
-  return revisions.reduce((content, revision) => {
-    if (content.includes(revision.original)) {
-      return content.replace(revision.original, revision.revised);
+export function applyAcceptedRevisions(original: string, revisions: Revision[]): string {
+  // Match against the source once, so one replacement cannot change another's target.
+  const positions: number[] = [];
+  let normalized = "";
+  for (let index = 0; index < original.length; index++) {
+    if (/\s/.test(original[index])) continue;
+    normalized += original[index];
+    positions.push(index);
+  }
+  const edits = revisions.map((revision) => {
+    if (typeof revision.original !== "string" || typeof revision.revised !== "string" || !revision.original.trim() || !revision.revised.trim()) {
+      throw new Error("建议缺少可替换的原文或修改内容，请重新分析。");
     }
-    if (content.includes(revision.revised)) return content;
-    return `${content.trimEnd()}\n\n${revision.revised}`;
-  }, original);
+    const target = revision.original.replace(/\s/g, "");
+    const start = normalized.indexOf(target);
+    if (start < 0) {
+      throw new Error(`无法定位建议“${revision.title}”的原文，尚未生成新版本。请重新分析，或在编辑区手动补充这条建议。`);
+    }
+    if (normalized.indexOf(target, start + 1) >= 0) {
+      throw new Error(`建议“${revision.title}”对应多处原文，请重新分析以获取更完整的原文定位。`);
+    }
+    return { start: positions[start], end: positions[start + target.length - 1] + 1, text: revision.revised };
+  }).sort((a, b) => a.start - b.start);
+  for (let index = 1; index < edits.length; index++) {
+    if (edits[index].start < edits[index - 1].end) {
+      throw new Error("采纳的建议修改了同一段重叠内容，请一次只采纳其中一条。");
+    }
+  }
+  return edits.reverse().reduce((content, edit) => content.slice(0, edit.start) + edit.text + content.slice(edit.end), original);
 }
 
 export function generateResumeStream(original: string, revisions: Revision[]): Promise<Response> | Response {
   const revisedDraft = applyAcceptedRevisions(original, revisions);
-  if (!aiIsConfigured()) {
-    return new Response(revisedDraft, { headers: { "Content-Type": "text/plain; charset=utf-8" } });
-  }
-  return streamModel(
-    `下面的“已应用建议草稿”已经将用户采纳的修改逐条写入。请在完整保留原简历事实和这些已采纳修改的前提下，整理成自然、清晰的最终简历。不得恢复被替换的原文，不得遗漏或撤销任何已采纳修改，也不得新增事实。只返回最终简历纯文本。\n\n<原简历>\n${original}\n</原简历>\n\n<已采纳建议>\n${JSON.stringify(revisions)}\n</已采纳建议>\n\n<已应用建议草稿>\n${revisedDraft}\n</已应用建议草稿>`,
-    (content) => applyAcceptedRevisions(content.trim() || revisedDraft, revisions),
-  );
+  // Suggestions already contain AI-written copy approved by the user.
+  // A second full rewrite could undo those decisions.
+  return new Response(revisedDraft, { headers: { "Content-Type": "text/plain; charset=utf-8", "Cache-Control": "no-store" } });
 }
 
 export function refineResumeStream(content: string, instruction: string): Promise<Response> {

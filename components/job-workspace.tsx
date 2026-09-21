@@ -141,7 +141,7 @@ export function JobWorkspace() {
 
   useEffect(() => {
     if (!analyzing) return;
-    const timer = window.setInterval(() => setAnalysisPhase((phase) => Math.min(phase + 1, analysisPhases.length - 1)), 3200);
+    const timer = window.setInterval(() => setAnalysisPhase((phase) => phase >= 2 ? phase : phase + 1), 20_000);
     return () => window.clearInterval(timer);
   }, [analyzing]);
 
@@ -248,6 +248,7 @@ export function JobWorkspace() {
           if (!line.trim()) continue;
           const streamEvent = JSON.parse(line) as { type: "summary" | "revision" | "done" | "error"; data?: AnalyzeResult | Revision; detail?: string };
           if (streamEvent.type === "summary") {
+            setAnalysisPhase(3);
             const summary = streamEvent.data as AnalyzeResult;
             setResult({ ...summary, analysis_mode: summary.analysis_mode ?? "ai", revisions: [] });
           } else if (streamEvent.type === "revision") {
@@ -267,6 +268,7 @@ export function JobWorkspace() {
 
   function setRevisionState(id: string, state: "accepted" | "dismissed") {
     setRevisionStates((current) => ({ ...current, [id]: state }));
+    setSuccessMessage(state === "accepted" ? "建议已选中，点击“重新生成简历”后写入正文。" : "");
   }
 
   async function regenerateResume() {
@@ -285,20 +287,14 @@ export function JobWorkspace() {
         const body = await response.json();
         throw new Error(body.detail ?? "简历生成失败");
       }
-      setResumeHistory([]);
-      let openedEditor = false;
-      const content = await readTextStream(response, (partial) => {
-        setGeneratedResume(partial);
-        if (!openedEditor) {
-          openedEditor = true;
-          requestAnimationFrame(() => document.querySelector("#resume-editor")?.scrollIntoView({ behavior: "smooth", block: "start" }));
-        }
-      });
+      const content = await readTextStream(response, () => {});
       if (!content) throw new Error("模型没有返回简历内容");
+      setResumeHistory(generatedResume ? [generatedResume] : []);
       setGeneratedResume(content.replace(/^```(?:text|markdown)?\s*|\s*```$/g, ""));
+      requestAnimationFrame(() => document.querySelector("#resume-editor")?.scrollIntoView({ behavior: "smooth", block: "start" }));
       setSuccessMessage("优化版简历已生成，可以直接编辑或下载。");
     } catch (generateError) {
-      setError(`${errorMessage(generateError, "简历生成失败")} 已生成的部分会保留，你可以直接编辑或重试。`);
+      setError(`${errorMessage(generateError, "简历生成失败")} 编辑区仍保留上一次版本。`);
     } finally {
       setGeneratingResume(false);
     }

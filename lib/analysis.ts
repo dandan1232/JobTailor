@@ -39,8 +39,8 @@ function buildRevisions(resume: string, role: string, matched: string[], gaps: s
   const revisions: Revision[] = [
     {
       id: "summary-focus", priority: "高", category: "个人摘要", title: "让开头直接回应目标岗位",
-      original: "简历开头缺少针对当前岗位的能力定位。",
-      revised: `面向${role}岗位，具备${skillSummary}等相关经验，能够独立推进服务开发、问题定位与交付。`,
+      original: resume.split("\n").find((line) => line.trim()) ?? resume,
+      revised: `${resume.split("\n").find((line) => line.trim()) ?? resume}\n面向${role}岗位，已有经历涉及${skillSummary}。`,
       reason: "招聘方通常先扫描顶部摘要。先说明岗位方向和已有证据，能更快建立相关性。",
     },
     {
@@ -108,9 +108,10 @@ export async function requestAiAnalysisStream(resumeText: string, jobDescription
   if (!aiIsConfigured()) return null;
   const prompt = `你是严谨的简历诊断助手。只根据简历和 JD 分析，禁止编造。
 严格输出 NDJSON，每行一个完整 JSON，不要 Markdown，也不要在 JSON 内换行。
-第 1 行：{"type":"summary","data":{"score":0到100整数,"verdict":"结论","dimensions":[4项 name/score/note],"requirements":[最多6项 label/status/evidence],"matched":[最多6项 skill/evidence],"gaps":[最多4项 skill/suggestion]}}
+第 1 行：{"type":"summary","data":{"score":0到100整数,"verdict":"结论","dimensions":[4项 name/score/note],"requirements":[最多6项 label/status/evidence，其中 status 只能是 pass 或 missing],"matched":[最多6项 skill/evidence],"gaps":[最多4项 skill/suggestion]}}
 之后每行一条：{"type":"revision","data":{"id":"唯一英文标识","priority":"高或中或低","category":"分类","title":"标题","original":"原文或缺失说明","revised":"建议表达","reason":"原因"}}
 输出 3 到 6 条 revision，每完成一条就立即输出该行。
+每条 revision 必须是可直接应用的原文替换：original 逐字引用简历中唯一、完整、连续的一段原文，revised 是该段修改后的完整正文。不要把缺失说明写入 original，不要把操作说明或“如果有经历请补充”写入 revised。新增摘要时引用开头段落，在 revised 中保留开头事实并加入摘要。缺乏事实依据的内容只写入 gaps，不生成可采纳建议。不同 revision 的 original 不得重叠。
 <resume>\n${resumeText}\n</resume>\n<job_description>\n${jobDescription}\n</job_description>`;
   const response = await fetch(`${process.env.AI_BASE_URL!.replace(/\/$/, "")}/chat/completions`, {
     method: "POST",

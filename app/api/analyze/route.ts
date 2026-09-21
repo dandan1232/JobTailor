@@ -1,4 +1,5 @@
 import { aiIsConfigured, analyzeResume, requestAiAnalysisStream } from "@/lib/analysis";
+import { AnalysisSseDecoder } from "@/lib/analysis-stream";
 
 export const runtime = "nodejs";
 
@@ -24,8 +25,7 @@ export async function POST(request: Request) {
     if (!upstream?.body) throw new Error("模型没有返回可读取的数据流。");
     const decoder = new TextDecoder();
     const encoder = new TextEncoder();
-    let sseBuffer = "";
-    let modelBuffer = "";
+    const sseDecoder = new AnalysisSseDecoder();
 
     const stream = new ReadableStream({
       async start(controller) {
@@ -34,32 +34,11 @@ export async function POST(request: Request) {
           while (true) {
             const { done, value } = await reader.read();
             if (done) break;
-            sseBuffer += decoder.decode(value, { stream: true });
-            const frames = sseBuffer.split("\n\n");
-            sseBuffer = frames.pop() ?? "";
-            for (const frame of frames) {
-              for (const line of frame.split("\n")) {
-                if (!line.startsWith("data:")) continue;
-                const data = line.slice(5).trim();
-                if (!data || data === "[DONE]") continue;
-                const chunk = JSON.parse(data) as { choices?: Array<{ delta?: { content?: string } }> };
-                modelBuffer += chunk.choices?.[0]?.delta?.content ?? "";
-                const rows = modelBuffer.split("\n");
-                modelBuffer = rows.pop() ?? "";
-                for (const row of rows) {
-                  const cleaned = row.trim().replace(/^```(?:json)?\s*|```$/g, "");
-                  if (!cleaned) continue;
-                  JSON.parse(cleaned);
-                  controller.enqueue(encoder.encode(`${cleaned}\n`));
-                }
-              }
-            }
+            const text = decoder.decode(value, { stream: true });
+            for (const row of sseDecoder.push(text)) controller.enqueue(encoder.encode(`${row}\n`));
           }
-          const last = modelBuffer.trim().replace(/^```(?:json)?\s*|```$/g, "");
-          if (last) {
-            JSON.parse(last);
-            controller.enqueue(encoder.encode(`${last}\n`));
-          }
+          const tail = decoder.decode();
+          for (const row of [...sseDecoder.push(tail), ...sseDecoder.finish()]) controller.enqueue(encoder.encode(`${row}\n`));
           controller.enqueue(encoder.encode(`${JSON.stringify({ type: "done" })}\n`));
         } catch (error) {
           controller.enqueue(encoder.encode(`${JSON.stringify({ type: "error", detail: error instanceof Error ? error.message : "流式分析失败" })}\n`));
