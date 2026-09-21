@@ -1,6 +1,6 @@
 import { aiIsConfigured, Revision } from "@/lib/analysis";
 
-async function streamModel(prompt: string): Promise<Response> {
+async function streamModel(prompt: string, finalize?: (content: string) => string): Promise<Response> {
   if (!aiIsConfigured()) throw new Error("AI 服务尚未配置");
   const upstream = await fetch(`${process.env.AI_BASE_URL!.replace(/\/$/, "")}/chat/completions`, {
     method: "POST",
@@ -22,6 +22,7 @@ async function streamModel(prompt: string): Promise<Response> {
   const decoder = new TextDecoder();
   const encoder = new TextEncoder();
   let buffer = "";
+  let generatedContent = "";
   const emitLine = (line: string, controller: ReadableStreamDefaultController<Uint8Array>) => {
     const trimmed = line.trim();
     if (!trimmed) return;
@@ -30,7 +31,10 @@ async function streamModel(prompt: string): Promise<Response> {
     try {
       const chunk = JSON.parse(data) as { choices?: Array<{ delta?: { content?: string }; message?: { content?: string } }> };
       const content = chunk.choices?.[0]?.delta?.content ?? chunk.choices?.[0]?.message?.content;
-      if (content) controller.enqueue(encoder.encode(content));
+      if (content) {
+        if (finalize) generatedContent += content;
+        else controller.enqueue(encoder.encode(content));
+      }
     } catch {
       // Ignore keep-alive/non-JSON lines; a partial JSON chunk is handled by the provider's next line.
     }
@@ -49,6 +53,7 @@ async function streamModel(prompt: string): Promise<Response> {
         }
         buffer += decoder.decode();
         if (buffer) emitLine(buffer, controller);
+        if (finalize) controller.enqueue(encoder.encode(finalize(generatedContent)));
         controller.close();
       } catch (error) {
         controller.error(error);
@@ -60,12 +65,25 @@ async function streamModel(prompt: string): Promise<Response> {
   return new Response(stream, { headers: { "Content-Type": "text/plain; charset=utf-8", "Cache-Control": "no-cache, no-transform", "X-Accel-Buffering": "no" } });
 }
 
+function applyAcceptedRevisions(original: string, revisions: Revision[]): string {
+  return revisions.reduce((content, revision) => {
+    if (content.includes(revision.original)) {
+      return content.replace(revision.original, revision.revised);
+    }
+    if (content.includes(revision.revised)) return content;
+    return `${content.trimEnd()}\n\n${revision.revised}`;
+  }, original);
+}
+
 export function generateResumeStream(original: string, revisions: Revision[]): Promise<Response> | Response {
+  const revisedDraft = applyAcceptedRevisions(original, revisions);
   if (!aiIsConfigured()) {
-    const content = revisions.reduce((text, revision) => text.includes(revision.original) ? text.replace(revision.original, revision.revised) : `${text}\n\n${revision.revised}`, original);
-    return new Response(content, { headers: { "Content-Type": "text/plain; charset=utf-8" } });
+    return new Response(revisedDraft, { headers: { "Content-Type": "text/plain; charset=utf-8" } });
   }
-  return streamModel(`在完整保留原简历事实的前提下，将已采纳建议自然融入原简历。可以调整语句顺序和表达，但禁止新增事实。保留清晰的纯文本章节与换行。\n\n<原简历>\n${original}\n</原简历>\n\n<已采纳建议>\n${JSON.stringify(revisions)}\n</已采纳建议>`);
+  return streamModel(
+    `下面的“已应用建议草稿”已经将用户采纳的修改逐条写入。请在完整保留原简历事实和这些已采纳修改的前提下，整理成自然、清晰的最终简历。不得恢复被替换的原文，不得遗漏或撤销任何已采纳修改，也不得新增事实。只返回最终简历纯文本。\n\n<原简历>\n${original}\n</原简历>\n\n<已采纳建议>\n${JSON.stringify(revisions)}\n</已采纳建议>\n\n<已应用建议草稿>\n${revisedDraft}\n</已应用建议草稿>`,
+    (content) => applyAcceptedRevisions(content.trim() || revisedDraft, revisions),
+  );
 }
 
 export function refineResumeStream(content: string, instruction: string): Promise<Response> {

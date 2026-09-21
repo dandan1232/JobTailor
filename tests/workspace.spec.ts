@@ -17,6 +17,9 @@ test("analyzes a resume against a job and accepts a revision", async ({ page }) 
   await summaryRevision.getByRole("button", { name: "采纳" }).click();
   await expect(summaryRevision.getByText("已采纳")).toBeVisible();
   await expect(page.getByRole("button", { name: "重新生成简历" })).toBeEnabled();
+  await page.getByRole("button", { name: "重新生成简历" }).click();
+  await expect(page.getByLabel("优化版简历正文")).toHaveValue(/面向Python 后端工程师岗位/);
+  await expect(page.getByText("优化版简历已生成，可以直接编辑或下载。")).toBeVisible();
   await page.screenshot({ path: "../test-results/desktop-analysis.png", fullPage: true });
 });
 
