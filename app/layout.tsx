@@ -1,4 +1,7 @@
 import type { Metadata, Viewport } from "next";
+import "@fontsource/noto-sans-sc/400.css";
+import "@fontsource/noto-sans-sc/500.css";
+import "@fontsource/noto-sans-sc/700.css";
 import "./globals.css";
 
 export const metadata: Metadata = {
@@ -10,7 +13,7 @@ export const viewport: Viewport = {
   width: "device-width",
   initialScale: 1,
   viewportFit: "cover",
-  themeColor: "#f4f7f8",
+  themeColor: "#eef2f5",
 };
 
 export default function RootLayout({ children }: Readonly<{ children: React.ReactNode }>) {
