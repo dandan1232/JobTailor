@@ -49,6 +49,7 @@ type AnalyzeResult = {
   revisions: Revision[];
 };
 type ResumeFile = { filename: string; characters: number; text: string };
+type WorkPhase = { label: string; detail: string; icon: "scan" | "spark" | "write" | "check" };
 
 const API_URL = "";
 
@@ -73,6 +74,30 @@ function errorMessage(error: unknown, fallback: string): string {
   return error instanceof Error ? error.message : fallback;
 }
 
+async function fetchWithTimeout(input: RequestInfo | URL, init: RequestInit, timeoutMs: number) {
+  const controller = new AbortController();
+  const timer = window.setTimeout(() => controller.abort(), timeoutMs);
+  try {
+    return await fetch(input, { ...init, signal: controller.signal });
+  } catch (error) {
+    if (error instanceof DOMException && error.name === "AbortError") throw new Error("请求等待时间过长，模型服务可能暂时繁忙。请稍后重试。");
+    throw error;
+  } finally {
+    window.clearTimeout(timer);
+  }
+}
+
+const analysisPhases: WorkPhase[] = [
+  { label: "读取简历内容", detail: "提取可验证的经历和技术关键词", icon: "scan" },
+  { label: "拆解岗位要求", detail: "把 JD 拆成技能、职责和证据点", icon: "spark" },
+  { label: "核对证据关系", detail: "只保留简历中能找到依据的匹配", icon: "write" },
+  { label: "整理修改建议", detail: "按影响程度逐条生成建议", icon: "check" },
+];
+
+function PhaseGlyph({ icon }: { icon: WorkPhase["icon"] }) {
+  return <svg className="phase-glyph" viewBox="0 0 48 48" aria-hidden="true"><circle className="phase-orbit" cx="24" cy="24" r="17" /><path className="phase-stroke" d={icon === "scan" ? "M15 18h18M15 24h12M15 30h9" : icon === "spark" ? "m24 10 2.5 8.5L35 21l-8.5 2.5L24 32l-2.5-8.5L13 21l8.5-2.5L24 10Z" : icon === "write" ? "m15 31 3.2-8.4L30 11l7 7-11.8 11.8L15 31Z" : "m14 25 6 6 14-15"} /></svg>;
+}
+
 export function JobWorkspace() {
   const fileInputRef = useRef<HTMLInputElement>(null);
   const suggestionsRef = useRef<HTMLElement>(null);
@@ -84,6 +109,7 @@ export function JobWorkspace() {
   const [analyzing, setAnalyzing] = useState(false);
   const [dragActive, setDragActive] = useState(false);
   const [error, setError] = useState("");
+  const [successMessage, setSuccessMessage] = useState("");
   const [revisionStates, setRevisionStates] = useState<Record<string, "accepted" | "dismissed">>({});
   const [generatedResume, setGeneratedResume] = useState("");
   const [resumeHistory, setResumeHistory] = useState<string[]>([]);
@@ -91,8 +117,29 @@ export function JobWorkspace() {
   const [generatingResume, setGeneratingResume] = useState(false);
   const [refiningResume, setRefiningResume] = useState(false);
   const [exporting, setExporting] = useState<"docx" | "pdf" | null>(null);
+  const [analysisPhase, setAnalysisPhase] = useState(0);
+  const [generationPhase, setGenerationPhase] = useState(0);
+  const [refinePhase, setRefinePhase] = useState(0);
 
   const acceptedRevisions = result?.revisions.filter((revision) => revisionStates[revision.id] === "accepted") ?? [];
+
+  useEffect(() => {
+    if (!analyzing) return;
+    const timer = window.setInterval(() => setAnalysisPhase((phase) => Math.min(phase + 1, analysisPhases.length - 1)), 3200);
+    return () => window.clearInterval(timer);
+  }, [analyzing]);
+
+  useEffect(() => {
+    if (!generatingResume) return;
+    const timer = window.setInterval(() => setGenerationPhase((phase) => Math.min(phase + 1, 2)), 2600);
+    return () => window.clearInterval(timer);
+  }, [generatingResume]);
+
+  useEffect(() => {
+    if (!refiningResume) return;
+    const timer = window.setInterval(() => setRefinePhase((phase) => Math.min(phase + 1, 2)), 2600);
+    return () => window.clearInterval(timer);
+  }, [refiningResume]);
 
   useEffect(() => {
     if (result?.revisions.length === 1) {
@@ -102,6 +149,7 @@ export function JobWorkspace() {
 
   async function uploadResume(file: File) {
     setError("");
+    setSuccessMessage("");
     setResult(null);
     setRevisionStates({});
 
@@ -156,15 +204,16 @@ export function JobWorkspace() {
     if (!resume) return;
 
     setError("");
+    setAnalysisPhase(0);
     setAnalyzing(true);
     setResult(null);
     setRevisionStates({});
     try {
-      const response = await fetch(`${API_URL}/api/analyze`, {
+      const response = await fetchWithTimeout(`${API_URL}/api/analyze`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ resume_text: resume.text, job_description: jobDescription }),
-      });
+      }, 180_000);
       if (!response.ok) {
         const body = await response.json();
         throw new Error(body.detail ?? "分析服务暂时不可用");
@@ -206,18 +255,21 @@ export function JobWorkspace() {
 
   async function regenerateResume() {
     if (!resume || !acceptedRevisions.length) return;
+    setGenerationPhase(0);
     setGeneratingResume(true);
     setError("");
+    setSuccessMessage("");
     try {
-      const response = await fetch("/api/resume/generate", {
+      const response = await fetchWithTimeout("/api/resume/generate", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ original: resume.text, revisions: acceptedRevisions }),
-      });
+      }, 180_000);
       const body = await response.json();
       if (!response.ok) throw new Error(body.detail ?? "简历生成失败");
       setResumeHistory([]);
       setGeneratedResume(body.content);
+      setSuccessMessage("优化版简历已生成，可以直接编辑或下载。");
       requestAnimationFrame(() => document.querySelector("#resume-editor")?.scrollIntoView({ behavior: "smooth", block: "start" }));
     } catch (generateError) {
       setError(errorMessage(generateError, "简历生成失败"));
@@ -229,19 +281,22 @@ export function JobWorkspace() {
   async function refineGeneratedResume(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
     if (!generatedResume || !aiInstruction.trim()) return;
+    setRefinePhase(0);
     setRefiningResume(true);
     setError("");
+    setSuccessMessage("");
     try {
-      const response = await fetch("/api/resume/refine", {
+      const response = await fetchWithTimeout("/api/resume/refine", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ content: generatedResume, instruction: aiInstruction }),
-      });
+      }, 180_000);
       const body = await response.json();
       if (!response.ok) throw new Error(body.detail ?? "AI 修改失败");
       setResumeHistory((history) => [...history, generatedResume]);
       setGeneratedResume(body.content);
       setAiInstruction("");
+      setSuccessMessage("AI 修改已完成，右侧编辑区已更新。你可以继续修改或撤销。");
     } catch (refineError) {
       setError(errorMessage(refineError, "AI 修改失败"));
     } finally {
@@ -382,6 +437,7 @@ export function JobWorkspace() {
             </label>
 
             {error ? <p className="error-message"><AlertTriangle size={16} />{error}</p> : null}
+            {successMessage ? <p className="success-message"><CheckCircle2 size={16} />{successMessage}</p> : null}
 
             <button className="primary-button" type="submit" disabled={!resume || jobDescription.trim().length < 30 || analyzing || uploading}>
               <span className="button-icon">{analyzing ? <LoaderCircle className="spin" size={18} /> : <ScanSearch size={18} />}</span>
@@ -393,13 +449,11 @@ export function JobWorkspace() {
           <section className="analysis-panel" id="analysis" aria-live="polite">
             {analyzing && !result ? (
               <div className="analysis-loading">
-                <span className="loading-mark"><Sparkles size={22} /></span>
-                <h2>正在建立证据对应关系</h2>
-                <div className="loading-steps">
-                  <span className="done"><Check size={14} /> 读取简历内容</span>
-                  <span className="active"><LoaderCircle className="spin" size={14} /> 对照岗位要求</span>
-                  <span><CircleDashed size={14} /> 生成修改建议</span>
-                </div>
+                <div className="phase-visual"><PhaseGlyph icon={analysisPhases[analysisPhase].icon} /><span className="phase-pulse" /></div>
+                <h2>{analysisPhases[analysisPhase].label}</h2>
+                <p className="phase-detail">{analysisPhases[analysisPhase].detail}</p>
+                <div className="phase-progress" aria-label="分析进度">{analysisPhases.map((phase, index) => <span key={phase.label} className={index <= analysisPhase ? "phase-active" : ""} />)}</div>
+                <div className="loading-steps">{analysisPhases.map((phase, index) => <span key={phase.label} className={index < analysisPhase ? "done" : index === analysisPhase ? "active" : ""}>{index < analysisPhase ? <Check size={14} /> : index === analysisPhase ? <LoaderCircle className="spin" size={14} /> : <CircleDashed size={14} />} {phase.label}</span>)}</div>
               </div>
             ) : result ? (
               <>
@@ -489,6 +543,7 @@ export function JobWorkspace() {
             </div>
             <div className="regenerate-bar">
               <div><strong>{acceptedRevisions.length} 条建议已采纳</strong><span>重新生成时只应用已采纳内容，原始事实会保留。</span></div>
+              {generatingResume ? <div className="inline-work"><PhaseGlyph icon={(["scan", "write", "check"] as const)[generationPhase]} /><span>{["整理采纳内容", "重组简历表达", "准备可编辑预览"][generationPhase]}</span></div> : null}
               <button className="primary-button regenerate-button" type="button" disabled={!acceptedRevisions.length || generatingResume} onClick={regenerateResume}>
                 <span className="button-icon">{generatingResume ? <LoaderCircle className="spin" size={17} /> : <RefreshCw size={17} />}</span>
                 <span>{generatingResume ? "正在重新生成" : "重新生成简历"}</span>
@@ -512,6 +567,7 @@ export function JobWorkspace() {
               <aside className="ai-refine-panel">
                 <div><MessageSquare size={18} /><strong>继续让 AI 修改</strong></div>
                 <p>点名某一段时只改该段；明确说“整体调整”时才会修改全文。</p>
+                {refiningResume ? <div className="inline-work refine-work"><PhaseGlyph icon={(["scan", "write", "check"] as const)[refinePhase]} /><span>{["读取当前版本", "按要求修改段落", "检查事实一致性"][refinePhase]}</span></div> : null}
                 <form onSubmit={refineGeneratedResume}>
                   <textarea value={aiInstruction} onChange={(event) => setAiInstruction(event.target.value)} placeholder="例如：把第二段写得更简洁，保留所有数据" aria-label="AI 修改要求" />
                   <button className="primary-button" type="submit" disabled={!aiInstruction.trim() || refiningResume}>
