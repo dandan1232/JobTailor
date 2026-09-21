@@ -112,7 +112,16 @@ export async function requestAiAnalysis(resumeText: string, jobDescription: stri
     body: JSON.stringify({ model: process.env.AI_MODEL, messages: [{ role: "system", content: "你只进行基于证据的简历分析，并严格输出 JSON。" }, { role: "user", content: prompt }], temperature: 0.2, response_format: { type: "json_object" } }),
     signal: AbortSignal.timeout(60_000),
   });
-  if (!response.ok) throw new Error("模型服务调用失败，请检查地址、密钥和模型名称");
+  if (!response.ok) {
+    const errorBody = await response.text();
+    const permissionDenied = response.status === 403 || /no access to model/i.test(errorBody);
+    if (permissionDenied) {
+      throw new Error(`当前 API Key 没有使用模型 ${process.env.AI_MODEL} 的权限，请在模型服务后台授权或更换可用模型。`);
+    }
+    if (response.status === 401) throw new Error("AI API Key 无效或已过期，请检查密钥。");
+    if (response.status === 404) throw new Error("AI 接口地址或模型名称不存在，请检查配置。");
+    throw new Error(`模型服务调用失败（HTTP ${response.status}），请稍后重试。`);
+  }
   const body = await response.json() as { choices?: Array<{ message?: { content?: string } }> };
   const content = body.choices?.[0]?.message?.content;
   if (!content) throw new Error("模型返回内容为空");

@@ -5,8 +5,10 @@ JobTailor is a web workspace that analyzes an uploaded PDF or DOCX resume agains
 ## Project structure
 
 ```text
-frontend/  Next.js and TypeScript full-stack app (UI, parsing, matching API, AI proxy)
-docs/      Local research material (ignored by Git)
+app/         Next.js pages and server-side API routes
+components/  User interface components
+lib/         Resume matching and AI integration
+tests/       End-to-end tests
 ```
 
 ## Run locally
@@ -22,7 +24,7 @@ Open `http://localhost:3000`.
 
 ## AI configuration
 
-The complete workflow runs in local preview mode without a model key. To enable AI analysis, copy `frontend/.env.local.example` to `frontend/.env.local` and configure a Chat Completions-compatible provider:
+The complete workflow runs in local preview mode without a model key. To enable AI analysis, copy `.env.local.example` to `.env.local` and configure a Chat Completions-compatible provider:
 
 ```text
 AI_BASE_URL=https://your-provider.example/v1
