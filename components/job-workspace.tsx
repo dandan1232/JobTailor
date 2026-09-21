@@ -87,6 +87,22 @@ async function fetchWithTimeout(input: RequestInfo | URL, init: RequestInit, tim
   }
 }
 
+async function readTextStream(response: Response, onText: (text: string) => void) {
+  if (!response.body) throw new Error("服务没有返回可读取的数据流");
+  const reader = response.body.getReader();
+  const decoder = new TextDecoder();
+  let content = "";
+  while (true) {
+    const { done, value } = await reader.read();
+    if (value) {
+      content += decoder.decode(value, { stream: !done });
+      onText(content);
+    }
+    if (done) break;
+  }
+  return content.trim();
+}
+
 const analysisPhases: WorkPhase[] = [
   { label: "读取简历内容", detail: "提取可验证的经历和技术关键词", icon: "scan" },
   { label: "拆解岗位要求", detail: "把 JD 拆成技能、职责和证据点", icon: "spark" },
@@ -265,14 +281,24 @@ export function JobWorkspace() {
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ original: resume.text, revisions: acceptedRevisions }),
       }, 180_000);
-      const body = await response.json();
-      if (!response.ok) throw new Error(body.detail ?? "简历生成失败");
+      if (!response.ok) {
+        const body = await response.json();
+        throw new Error(body.detail ?? "简历生成失败");
+      }
       setResumeHistory([]);
-      setGeneratedResume(body.content);
+      let openedEditor = false;
+      const content = await readTextStream(response, (partial) => {
+        setGeneratedResume(partial);
+        if (!openedEditor) {
+          openedEditor = true;
+          requestAnimationFrame(() => document.querySelector("#resume-editor")?.scrollIntoView({ behavior: "smooth", block: "start" }));
+        }
+      });
+      if (!content) throw new Error("模型没有返回简历内容");
+      setGeneratedResume(content.replace(/^```(?:text|markdown)?\s*|\s*```$/g, ""));
       setSuccessMessage("优化版简历已生成，可以直接编辑或下载。");
-      requestAnimationFrame(() => document.querySelector("#resume-editor")?.scrollIntoView({ behavior: "smooth", block: "start" }));
     } catch (generateError) {
-      setError(errorMessage(generateError, "简历生成失败"));
+      setError(`${errorMessage(generateError, "简历生成失败")} 已生成的部分会保留，你可以直接编辑或重试。`);
     } finally {
       setGeneratingResume(false);
     }
@@ -291,14 +317,19 @@ export function JobWorkspace() {
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ content: generatedResume, instruction: aiInstruction }),
       }, 180_000);
-      const body = await response.json();
-      if (!response.ok) throw new Error(body.detail ?? "AI 修改失败");
-      setResumeHistory((history) => [...history, generatedResume]);
-      setGeneratedResume(body.content);
+      if (!response.ok) {
+        const body = await response.json();
+        throw new Error(body.detail ?? "AI 修改失败");
+      }
+      const previous = generatedResume;
+      setResumeHistory((history) => [...history, previous]);
+      const content = await readTextStream(response, setGeneratedResume);
+      if (!content) throw new Error("模型没有返回修改内容");
+      setGeneratedResume(content.replace(/^```(?:text|markdown)?\s*|\s*```$/g, ""));
       setAiInstruction("");
       setSuccessMessage("AI 修改已完成，右侧编辑区已更新。你可以继续修改或撤销。");
     } catch (refineError) {
-      setError(errorMessage(refineError, "AI 修改失败"));
+      setError(`${errorMessage(refineError, "AI 修改失败")} 已返回的部分会保留，可撤销后重试。`);
     } finally {
       setRefiningResume(false);
     }
