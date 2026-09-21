@@ -7,19 +7,23 @@ import {
   CheckCircle2,
   ChevronDown,
   CircleDashed,
+  Download,
   FileCheck2,
   FileSearch,
   FileText,
   LoaderCircle,
   Menu,
+  MessageSquare,
+  RefreshCw,
   ScanSearch,
   ShieldCheck,
   Sparkles,
   Trash2,
+  Undo2,
   UploadCloud,
   X,
 } from "lucide-react";
-import { ChangeEvent, DragEvent, FormEvent, useRef, useState } from "react";
+import { ChangeEvent, DragEvent, FormEvent, useEffect, useRef, useState } from "react";
 
 type Dimension = { name: string; score: number; note: string };
 type Requirement = { label: string; status: "pass" | "missing"; evidence: string };
@@ -71,6 +75,7 @@ function errorMessage(error: unknown, fallback: string): string {
 
 export function JobWorkspace() {
   const fileInputRef = useRef<HTMLInputElement>(null);
+  const suggestionsRef = useRef<HTMLElement>(null);
   const [mobileNavOpen, setMobileNavOpen] = useState(false);
   const [resume, setResume] = useState<ResumeFile | null>(null);
   const [jobDescription, setJobDescription] = useState("");
@@ -80,6 +85,20 @@ export function JobWorkspace() {
   const [dragActive, setDragActive] = useState(false);
   const [error, setError] = useState("");
   const [revisionStates, setRevisionStates] = useState<Record<string, "accepted" | "dismissed">>({});
+  const [generatedResume, setGeneratedResume] = useState("");
+  const [resumeHistory, setResumeHistory] = useState<string[]>([]);
+  const [aiInstruction, setAiInstruction] = useState("");
+  const [generatingResume, setGeneratingResume] = useState(false);
+  const [refiningResume, setRefiningResume] = useState(false);
+  const [exporting, setExporting] = useState<"docx" | "pdf" | null>(null);
+
+  const acceptedRevisions = result?.revisions.filter((revision) => revisionStates[revision.id] === "accepted") ?? [];
+
+  useEffect(() => {
+    if (result?.revisions.length === 1) {
+      suggestionsRef.current?.scrollIntoView({ behavior: "smooth", block: "start" });
+    }
+  }, [result?.revisions.length]);
 
   async function uploadResume(file: File) {
     setError("");
@@ -185,6 +204,85 @@ export function JobWorkspace() {
     setRevisionStates((current) => ({ ...current, [id]: state }));
   }
 
+  async function regenerateResume() {
+    if (!resume || !acceptedRevisions.length) return;
+    setGeneratingResume(true);
+    setError("");
+    try {
+      const response = await fetch("/api/resume/generate", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ original: resume.text, revisions: acceptedRevisions }),
+      });
+      const body = await response.json();
+      if (!response.ok) throw new Error(body.detail ?? "简历生成失败");
+      setResumeHistory([]);
+      setGeneratedResume(body.content);
+      requestAnimationFrame(() => document.querySelector("#resume-editor")?.scrollIntoView({ behavior: "smooth", block: "start" }));
+    } catch (generateError) {
+      setError(errorMessage(generateError, "简历生成失败"));
+    } finally {
+      setGeneratingResume(false);
+    }
+  }
+
+  async function refineGeneratedResume(event: FormEvent<HTMLFormElement>) {
+    event.preventDefault();
+    if (!generatedResume || !aiInstruction.trim()) return;
+    setRefiningResume(true);
+    setError("");
+    try {
+      const response = await fetch("/api/resume/refine", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ content: generatedResume, instruction: aiInstruction }),
+      });
+      const body = await response.json();
+      if (!response.ok) throw new Error(body.detail ?? "AI 修改失败");
+      setResumeHistory((history) => [...history, generatedResume]);
+      setGeneratedResume(body.content);
+      setAiInstruction("");
+    } catch (refineError) {
+      setError(errorMessage(refineError, "AI 修改失败"));
+    } finally {
+      setRefiningResume(false);
+    }
+  }
+
+  function undoResumeChange() {
+    setResumeHistory((history) => {
+      const previous = history.at(-1);
+      if (previous) setGeneratedResume(previous);
+      return history.slice(0, -1);
+    });
+  }
+
+  async function downloadResume(format: "docx" | "pdf") {
+    if (!generatedResume || !resume) return;
+    setExporting(format);
+    try {
+      const response = await fetch("/api/resume/export", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ content: generatedResume, format, filename: resume.filename }),
+      });
+      if (!response.ok) {
+        const body = await response.json();
+        throw new Error(body.detail ?? "文件导出失败");
+      }
+      const url = URL.createObjectURL(await response.blob());
+      const link = document.createElement("a");
+      link.href = url;
+      link.download = `${resume.filename.replace(/\.(pdf|docx)$/i, "")}-优化版.${format}`;
+      link.click();
+      URL.revokeObjectURL(url);
+    } catch (exportError) {
+      setError(errorMessage(exportError, "文件导出失败"));
+    } finally {
+      setExporting(null);
+    }
+  }
+
   return (
     <div className="app-shell">
       <aside className={`sidebar ${mobileNavOpen ? "sidebar-open" : ""}`}>
@@ -286,9 +384,9 @@ export function JobWorkspace() {
             {error ? <p className="error-message"><AlertTriangle size={16} />{error}</p> : null}
 
             <button className="primary-button" type="submit" disabled={!resume || jobDescription.trim().length < 30 || analyzing || uploading}>
-              {analyzing ? <LoaderCircle className="spin" size={18} /> : <ScanSearch size={18} />}
-              {analyzing ? "正在分析简历与岗位" : "开始匹配分析"}
-              {analyzing ? null : <ArrowRight size={18} />}
+              <span className="button-icon">{analyzing ? <LoaderCircle className="spin" size={18} /> : <ScanSearch size={18} />}</span>
+              <span>{analyzing ? "正在分析简历与岗位" : "开始匹配分析"}</span>
+              <span className="button-icon">{analyzing ? null : <ArrowRight size={18} />}</span>
             </button>
           </section>
 
@@ -351,7 +449,7 @@ export function JobWorkspace() {
         </form>
 
         {result ? (
-          <section className="suggestions-section" id="suggestions">
+          <section className="suggestions-section suggestions-enter" id="suggestions" ref={suggestionsRef}>
             <div className="suggestions-heading">
               <div><span className="step-label">修改建议</span><h2>按影响程度逐条处理</h2></div>
               <span className="suggestion-count">{analyzing ? `已生成 ${result.revisions.length} 条` : `${result.revisions.length} 条建议`}</span>
@@ -388,6 +486,45 @@ export function JobWorkspace() {
                   </article>
                 );
               })}
+            </div>
+            <div className="regenerate-bar">
+              <div><strong>{acceptedRevisions.length} 条建议已采纳</strong><span>重新生成时只应用已采纳内容，原始事实会保留。</span></div>
+              <button className="primary-button regenerate-button" type="button" disabled={!acceptedRevisions.length || generatingResume} onClick={regenerateResume}>
+                <span className="button-icon">{generatingResume ? <LoaderCircle className="spin" size={17} /> : <RefreshCw size={17} />}</span>
+                <span>{generatingResume ? "正在重新生成" : "重新生成简历"}</span>
+                <span className="button-icon" />
+              </button>
+            </div>
+          </section>
+        ) : null}
+
+        {generatedResume ? (
+          <section className="resume-editor-section suggestions-enter" id="resume-editor">
+            <div className="suggestions-heading">
+              <div><span className="step-label">优化版简历</span><h2>检查、修改并下载</h2></div>
+              <button className="action-button" type="button" disabled={!resumeHistory.length} onClick={undoResumeChange}><Undo2 size={16} />撤销上一步</button>
+            </div>
+            <div className="editor-grid">
+              <label className="resume-document">
+                <span>可直接编辑正文</span>
+                <textarea value={generatedResume} onChange={(event) => setGeneratedResume(event.target.value)} aria-label="优化版简历正文" />
+              </label>
+              <aside className="ai-refine-panel">
+                <div><MessageSquare size={18} /><strong>继续让 AI 修改</strong></div>
+                <p>点名某一段时只改该段；明确说“整体调整”时才会修改全文。</p>
+                <form onSubmit={refineGeneratedResume}>
+                  <textarea value={aiInstruction} onChange={(event) => setAiInstruction(event.target.value)} placeholder="例如：把第二段写得更简洁，保留所有数据" aria-label="AI 修改要求" />
+                  <button className="primary-button" type="submit" disabled={!aiInstruction.trim() || refiningResume}>
+                    <span className="button-icon">{refiningResume ? <LoaderCircle className="spin" size={17} /> : <Sparkles size={17} />}</span>
+                    <span>{refiningResume ? "正在修改" : "应用 AI 修改"}</span>
+                    <span className="button-icon" />
+                  </button>
+                </form>
+                <div className="download-actions">
+                  <button className="action-button" type="button" disabled={Boolean(exporting)} onClick={() => downloadResume("docx")}><Download size={16} />{exporting === "docx" ? "生成中" : "下载 DOCX"}</button>
+                  <button className="action-button accept-button" type="button" disabled={Boolean(exporting)} onClick={() => downloadResume("pdf")}><Download size={16} />{exporting === "pdf" ? "生成中" : "下载 PDF"}</button>
+                </div>
+              </aside>
             </div>
           </section>
         ) : null}

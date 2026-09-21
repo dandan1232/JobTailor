@@ -10,16 +10,20 @@
     "test:e2e": "playwright test"
   },
   "dependencies": {
+    "@fontsource/noto-sans-sc": "^5.3.0",
+    "docx": "^9.7.1",
     "lucide-react": "1.47.0",
     "mammoth": "^1.12.3",
     "next": "16.3.5",
     "pdf-parse": "^2.4.5",
+    "pdfkit": "^0.20.2",
     "react": "19.3.0",
     "react-dom": "19.3.0"
   },
   "devDependencies": {
     "@playwright/test": "1.63.0",
     "@types/node": "^24.0.0",
+    "@types/pdfkit": "^0.17.6",
     "@types/react": "^19.0.0",
     "@types/react-dom": "^19.0.0",
     "eslint": "^9.0.0",

@@ -16,6 +16,7 @@ test("analyzes a resume against a job and accepts a revision", async ({ page }) 
   const summaryRevision = page.locator(".revision-item", { hasText: "让开头直接回应目标岗位" });
   await summaryRevision.getByRole("button", { name: "采纳" }).click();
   await expect(summaryRevision.getByText("已采纳")).toBeVisible();
+  await expect(page.getByRole("button", { name: "重新生成简历" })).toBeEnabled();
   await page.screenshot({ path: "../test-results/desktop-analysis.png", fullPage: true });
 });
 
