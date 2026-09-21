@@ -6,7 +6,6 @@ JobTailor is a web workspace that analyzes an uploaded PDF or DOCX resume agains
 
 ```text
 frontend/  Next.js and TypeScript full-stack app (UI, parsing, matching API, AI proxy)
-backend/   Legacy FastAPI implementation kept for reference/tests
 docs/      Local research material (ignored by Git)
 ```
 
@@ -15,7 +14,6 @@ docs/      Local research material (ignored by Git)
 Start the app:
 
 ```powershell
-cd frontend
 npm install
 npm run dev
 ```
@@ -37,7 +35,6 @@ Resume files are parsed in memory and are not stored. When AI mode is configured
 ## Checks
 
 ```powershell
-cd frontend
 npm run lint
 npm run build
 npm run test:e2e
