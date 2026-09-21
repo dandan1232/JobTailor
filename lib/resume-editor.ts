@@ -22,6 +22,19 @@ async function streamModel(prompt: string): Promise<Response> {
   const decoder = new TextDecoder();
   const encoder = new TextEncoder();
   let buffer = "";
+  const emitLine = (line: string, controller: ReadableStreamDefaultController<Uint8Array>) => {
+    const trimmed = line.trim();
+    if (!trimmed) return;
+    const data = trimmed.startsWith("data:") ? trimmed.slice(5).trim() : trimmed;
+    if (!data || data === "[DONE]") return;
+    try {
+      const chunk = JSON.parse(data) as { choices?: Array<{ delta?: { content?: string }; message?: { content?: string } }> };
+      const content = chunk.choices?.[0]?.delta?.content ?? chunk.choices?.[0]?.message?.content;
+      if (content) controller.enqueue(encoder.encode(content));
+    } catch {
+      // Ignore keep-alive/non-JSON lines; a partial JSON chunk is handled by the provider's next line.
+    }
+  };
   const stream = new ReadableStream({
     async start(controller) {
       const reader = upstream.body!.getReader();
@@ -30,19 +43,12 @@ async function streamModel(prompt: string): Promise<Response> {
           const { done, value } = await reader.read();
           if (done) break;
           buffer += decoder.decode(value, { stream: true });
-          const frames = buffer.split("\n\n");
-          buffer = frames.pop() ?? "";
-          for (const frame of frames) {
-            for (const line of frame.split("\n")) {
-              if (!line.startsWith("data:")) continue;
-              const data = line.slice(5).trim();
-              if (!data || data === "[DONE]") continue;
-              const chunk = JSON.parse(data) as { choices?: Array<{ delta?: { content?: string } }> };
-              const content = chunk.choices?.[0]?.delta?.content;
-              if (content) controller.enqueue(encoder.encode(content));
-            }
-          }
+          const lines = buffer.split(/\r?\n/);
+          buffer = lines.pop() ?? "";
+          for (const line of lines) emitLine(line, controller);
         }
+        buffer += decoder.decode();
+        if (buffer) emitLine(buffer, controller);
         controller.close();
       } catch (error) {
         controller.error(error);

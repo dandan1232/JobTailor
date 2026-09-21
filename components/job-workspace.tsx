@@ -584,7 +584,7 @@ export function JobWorkspace() {
           </section>
         ) : null}
 
-        {generatedResume ? (
+        {generatedResume || generatingResume ? (
           <section className="resume-editor-section suggestions-enter" id="resume-editor">
             <div className="suggestions-heading">
               <div><span className="step-label">优化版简历</span><h2>检查、修改并下载</h2></div>
