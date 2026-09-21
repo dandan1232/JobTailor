@@ -146,9 +146,34 @@ export function JobWorkspace() {
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ resume_text: resume.text, job_description: jobDescription }),
       });
-      const body = await response.json();
-      if (!response.ok) throw new Error(body.detail ?? "分析服务暂时不可用");
-      setResult(body as AnalyzeResult);
+      if (!response.ok) {
+        const body = await response.json();
+        throw new Error(body.detail ?? "分析服务暂时不可用");
+      }
+      if (!response.body) throw new Error("分析服务没有返回数据流");
+
+      const reader = response.body.getReader();
+      const decoder = new TextDecoder();
+      let buffer = "";
+      while (true) {
+        const { done, value } = await reader.read();
+        buffer += decoder.decode(value ?? new Uint8Array(), { stream: !done });
+        const lines = buffer.split("\n");
+        buffer = lines.pop() ?? "";
+        for (const line of lines) {
+          if (!line.trim()) continue;
+          const streamEvent = JSON.parse(line) as { type: "summary" | "revision" | "done" | "error"; data?: AnalyzeResult | Revision; detail?: string };
+          if (streamEvent.type === "summary") {
+            const summary = streamEvent.data as AnalyzeResult;
+            setResult({ ...summary, analysis_mode: summary.analysis_mode ?? "ai", revisions: [] });
+          } else if (streamEvent.type === "revision") {
+            setResult((current) => current ? { ...current, revisions: [...current.revisions, streamEvent.data as Revision] } : current);
+          } else if (streamEvent.type === "error") {
+            throw new Error(streamEvent.detail ?? "流式分析失败");
+          }
+        }
+        if (done) break;
+      }
     } catch (analysisError) {
       setError(errorMessage(analysisError, "无法连接分析服务，请确认后端已经启动。"));
     } finally {
@@ -268,7 +293,7 @@ export function JobWorkspace() {
           </section>
 
           <section className="analysis-panel" id="analysis" aria-live="polite">
-            {analyzing ? (
+            {analyzing && !result ? (
               <div className="analysis-loading">
                 <span className="loading-mark"><Sparkles size={22} /></span>
                 <h2>正在建立证据对应关系</h2>
@@ -329,7 +354,7 @@ export function JobWorkspace() {
           <section className="suggestions-section" id="suggestions">
             <div className="suggestions-heading">
               <div><span className="step-label">修改建议</span><h2>按影响程度逐条处理</h2></div>
-              <span className="suggestion-count">{result.revisions.length} 条建议</span>
+              <span className="suggestion-count">{analyzing ? `已生成 ${result.revisions.length} 条` : `${result.revisions.length} 条建议`}</span>
             </div>
             <div className="revision-list">
               {result.revisions.map((revision) => {

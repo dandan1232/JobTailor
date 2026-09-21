@@ -104,6 +104,39 @@ export function aiIsConfigured() {
   return Boolean(process.env.AI_BASE_URL && process.env.AI_API_KEY && process.env.AI_MODEL);
 }
 
+export async function requestAiAnalysisStream(resumeText: string, jobDescription: string): Promise<Response | null> {
+  if (!aiIsConfigured()) return null;
+  const prompt = `你是严谨的简历诊断助手。只根据简历和 JD 分析，禁止编造。
+严格输出 NDJSON，每行一个完整 JSON，不要 Markdown，也不要在 JSON 内换行。
+第 1 行：{"type":"summary","data":{"score":0到100整数,"verdict":"结论","dimensions":[4项 name/score/note],"requirements":[最多6项 label/status/evidence],"matched":[最多6项 skill/evidence],"gaps":[最多4项 skill/suggestion]}}
+之后每行一条：{"type":"revision","data":{"id":"唯一英文标识","priority":"高或中或低","category":"分类","title":"标题","original":"原文或缺失说明","revised":"建议表达","reason":"原因"}}
+输出 3 到 6 条 revision，每完成一条就立即输出该行。
+<resume>\n${resumeText}\n</resume>\n<job_description>\n${jobDescription}\n</job_description>`;
+  const response = await fetch(`${process.env.AI_BASE_URL!.replace(/\/$/, "")}/chat/completions`, {
+    method: "POST",
+    headers: { Authorization: `Bearer ${process.env.AI_API_KEY}`, "Content-Type": "application/json" },
+    body: JSON.stringify({
+      model: process.env.AI_MODEL,
+      messages: [
+        { role: "system", content: "你只进行基于证据的简历分析，并严格逐行输出 NDJSON。" },
+        { role: "user", content: prompt },
+      ],
+      temperature: 0.2,
+      stream: true,
+    }),
+    signal: AbortSignal.timeout(5 * 60_000),
+  });
+  if (!response.ok) {
+    const detail = await response.text();
+    if (response.status === 403 || /no access to model/i.test(detail)) {
+      throw new Error(`当前 API Key 没有使用模型 ${process.env.AI_MODEL} 的权限。`);
+    }
+    throw new Error(`模型服务调用失败（HTTP ${response.status}）。`);
+  }
+  if (!response.body) throw new Error("模型没有返回可读取的数据流。");
+  return response;
+}
+
 export async function requestAiAnalysis(resumeText: string, jobDescription: string): Promise<AnalyzeResult | null> {
   if (!aiIsConfigured()) return null;
   const prompt = `你是严谨的简历诊断助手。只根据用户提供的简历和 JD 分析，禁止编造技能、数字、职责或结果。只返回 JSON，不要 Markdown。JSON 必须包含 score(0-100整数)、verdict、dimensions(四项 name/score/note)、requirements(最多6项 label/status/evidence)、matched(最多6项 skill/evidence)、gaps(最多4项 skill/suggestion)、revisions(3-6项 id/priority/category/title/original/revised/reason)。\n<resume>\n${resumeText}\n</resume>\n<job_description>\n${jobDescription}\n</job_description>`;

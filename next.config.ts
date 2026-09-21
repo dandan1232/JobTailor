@@ -1,6 +1,7 @@
 import type { NextConfig } from "next";
 
 const nextConfig: NextConfig = {
+  agentRules: false,
   // pdf-parse loads pdf.worker.mjs at runtime; bundling it breaks that path in dev.
   serverExternalPackages: ["pdf-parse", "pdfjs-dist"],
 };
