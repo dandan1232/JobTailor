@@ -2,6 +2,10 @@
 
 JobTailor is a web workspace that analyzes an uploaded PDF or DOCX resume against a target job description, then returns evidence-based matching results and prioritized revision suggestions. The active app is a single Next.js full-stack project.
 
+## Try it online
+
+Use JobTailor at [https://job.nianan.ggff.net/](https://job.nianan.ggff.net/).
+
 ## Project structure
 
 ```text
