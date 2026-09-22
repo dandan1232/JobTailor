@@ -41,3 +41,24 @@ npm run lint
 npm run build
 npm run test:e2e
 ```
+
+## Deploy with Docker Compose
+
+The production container listens on host port `3200` and exposes a health check
+at `/api/health`.
+
+```bash
+cp .env.production.example .env.production
+# Add the optional AI provider settings to .env.production.
+bash scripts/deploy.sh
+```
+
+To rebuild and restart automatically after a successful `git pull` or merge,
+install the repository-local post-merge hook once:
+
+```bash
+bash scripts/install-post-merge-hook.sh
+```
+
+The hook is local to the server clone and is never committed. A failed image
+build leaves the currently running container untouched.
