@@ -34,3 +34,17 @@ test("keeps upload, JD input, and analysis controls usable on mobile", async ({ 
 
   await page.screenshot({ path: "../test-results/mobile-upload.png", fullPage: true });
 });
+
+test("shows a useful error when resume extraction returns an empty response", async ({ page }) => {
+  await page.route("**/api/resume/extract", (route) => route.fulfill({ status: 502, body: "" }));
+  await page.goto("/");
+
+  await page.locator('input[type="file"]').setInputFiles({
+    name: "resume.pdf",
+    mimeType: "application/pdf",
+    buffer: Buffer.from("%PDF-1.4 test"),
+  });
+
+  await expect(page.getByText("简历读取服务暂时不可用（HTTP 502），请稍后重试。")).toBeVisible();
+  await expect(page.getByText(/Unexpected end of JSON input/)).toHaveCount(0);
+});

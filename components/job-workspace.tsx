@@ -74,6 +74,36 @@ function errorMessage(error: unknown, fallback: string): string {
   return error instanceof Error ? error.message : fallback;
 }
 
+async function readResumeResponse(response: Response): Promise<ResumeFile> {
+  const rawBody = await response.text();
+  let body: Partial<ResumeFile> & { detail?: unknown } = {};
+
+  if (rawBody.trim()) {
+    try {
+      const parsed: unknown = JSON.parse(rawBody);
+      if (typeof parsed === "object" && parsed !== null && !Array.isArray(parsed)) {
+        body = parsed as Partial<ResumeFile> & { detail?: unknown };
+      } else if (response.ok) {
+        throw new Error("简历读取失败：服务返回了无法识别的数据。");
+      }
+    } catch {
+      if (response.ok) throw new Error("简历读取失败：服务返回了无法识别的数据。");
+    }
+  }
+
+  if (!response.ok) {
+    if (typeof body.detail === "string" && body.detail.trim()) throw new Error(body.detail);
+    if (response.status === 413) throw new Error("上传失败：服务器拒绝了文件大小，请上传更小的简历。");
+    throw new Error(`简历读取服务暂时不可用（HTTP ${response.status}），请稍后重试。`);
+  }
+
+  if (typeof body.filename !== "string" || typeof body.characters !== "number" || typeof body.text !== "string") {
+    throw new Error("简历读取失败：服务没有返回完整的简历内容。");
+  }
+
+  return body as ResumeFile;
+}
+
 async function fetchWithTimeout(input: RequestInfo | URL, init: RequestInit, timeoutMs: number) {
   const controller = new AbortController();
   const timer = window.setTimeout(() => controller.abort(), timeoutMs);
@@ -184,9 +214,7 @@ export function JobWorkspace() {
       const formData = new FormData();
       formData.append("file", file);
       const response = await fetch(`${API_URL}/api/resume/extract`, { method: "POST", body: formData });
-      const body = await response.json();
-      if (!response.ok) throw new Error(body.detail ?? "简历读取失败");
-      setResume(body as ResumeFile);
+      setResume(await readResumeResponse(response));
     } catch (uploadError) {
       setError(errorMessage(uploadError, "简历读取失败，请稍后重试。"));
     } finally {
