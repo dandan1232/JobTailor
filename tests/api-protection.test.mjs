@@ -96,6 +96,31 @@ test("global AI rate limit still applies after clearing cookies and forging forw
   assert.match((await blocked.json()).detail, /额度/);
 });
 
+test("globally rejected anonymous AI requests do not fill client records or block local work", async () => {
+  const protect = createApiProtection({ maxClients: 64 });
+  for (let index = 0; index < AI_USAGE_LIMITS.globalRequests; index++) {
+    assert.equal((await consume(await protect(request(), "analyze", success))).status, 200);
+  }
+  for (let index = 0; index < 8; index++) {
+    assert.equal((await protect(request(), "analyze", success)).status, 429);
+  }
+  assert.equal((await consume(await protect(request(), "export", success))).status, 200);
+});
+
+test("global concurrency rejections do not reserve client records", async () => {
+  const protect = createApiProtection({ maxClients: AI_USAGE_LIMITS.globalConcurrent + 1 });
+  const held = [];
+  try {
+    for (let index = 0; index < AI_USAGE_LIMITS.globalConcurrent; index++) {
+      held.push(await protect(request(), "analyze", () => new Response(new ReadableStream())));
+    }
+    for (let index = 0; index < 3; index++) assert.equal((await protect(request(), "analyze", success)).status, 429);
+    assert.equal((await consume(await protect(request(), "export", success))).status, 200);
+  } finally {
+    await Promise.all(held.map((response) => response.body.cancel()));
+  }
+});
+
 test("forged forwarding headers cannot reset a signed client's quota", async () => {
   const protect = createApiProtection();
   const first = await consume(await protect(request(), "refine", success));
@@ -144,9 +169,72 @@ test("request disconnect propagates through the handler and frees concurrency", 
   const second = await protect(request(cookie), "refine", () => new Response(new ReadableStream()));
   controller.abort();
   assert.equal(signal.aborted, true);
-  assert.equal((await consume(await protect(request(cookie), "analyze", success))).status, 200);
   await first.body.cancel();
+  assert.equal((await consume(await protect(request(cookie), "analyze", success))).status, 200);
   await second.body.cancel();
+});
+
+test("disconnected non-cancellable handlers keep concurrency until their work actually finishes", async () => {
+  const protect = createApiProtection();
+  let finishWork;
+  const work = new Promise((resolve) => { finishWork = resolve; });
+  let started = 0;
+  let allStarted;
+  const ready = new Promise((resolve) => { allStarted = resolve; });
+  const controllers = Array.from({ length: 6 }, () => new AbortController());
+  const pending = controllers.map((controller) => protect(request(null, "{}", {}, controller.signal), "extract", async (incoming) => {
+    started++;
+    if (started === controllers.length) allStarted();
+    await work;
+    assert.equal(incoming.signal.aborted, true);
+    return success();
+  }));
+  await ready;
+  try {
+    assert.equal((await protect(request(), "export", success)).status, 429);
+    controllers.forEach((controller) => controller.abort());
+    assert.equal((await protect(request(), "export", success)).status, 429);
+  } finally {
+    finishWork();
+    const responses = await Promise.all(pending);
+    for (const response of responses) assert.equal(response.status, 408);
+  }
+  assert.equal((await consume(await protect(request(), "export", success))).status, 200);
+});
+
+test("stream cancellation keeps its lease while asynchronous cleanup and pending reads finish", async () => {
+  for (const [disconnect, rejectCleanup] of [[false, false], [false, true], [true, false], [true, true]]) {
+    const protect = createApiProtection();
+    const caller = new AbortController();
+    let finishCleanup;
+    let cleanupStarted;
+    const ready = new Promise((resolve) => { cleanupStarted = resolve; });
+    const cleanup = new Promise((resolve, reject) => { finishCleanup = () => rejectCleanup ? reject(new Error("cleanup failed")) : resolve(); });
+    const first = await protect(request(null, "{}", {}, caller.signal), "analyze", () => new Response(new ReadableStream({
+      cancel() { cleanupStarted(); return cleanup; },
+    })));
+    const cookie = sessionCookie(first);
+    const second = await protect(request(cookie), "refine", () => new Response(new ReadableStream()));
+    let cancelling;
+    if (disconnect) {
+      caller.abort("连接断开");
+      cancelling = first.text();
+    } else {
+      cancelling = first.body.cancel("用户取消");
+    }
+    const settled = rejectCleanup ? assert.rejects(cancelling, /cleanup failed/) : cancelling;
+    try {
+      await ready;
+      // A cancellation resolves the wrapper's pending read before cleanup settles.
+      await new Promise((resolve) => setTimeout(resolve, 0));
+      assert.equal((await protect(request(cookie), "analyze", success)).status, 429);
+    } finally {
+      finishCleanup();
+      await settled;
+    }
+    assert.equal((await consume(await protect(request(cookie), "analyze", success))).status, 200);
+    await second.body.cancel();
+  }
 });
 
 test("handler failures and stream errors release their slots", async () => {

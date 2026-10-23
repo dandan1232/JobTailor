@@ -37,15 +37,29 @@ function loadRoute(readFont = readFile, platform = process.platform) {
   return exports.POST;
 }
 
-function exportRequest(format) {
+function exportRequest(format, text = content) {
   return new Request("http://localhost/api/resume/export", {
     method: "POST",
     headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ content, format, filename: "中文简历.pdf" }),
+    body: JSON.stringify({ content: text, format, filename: "中文简历.pdf" }),
   });
 }
 
 const compact = (text) => text.replace(/\s/g, "");
+
+test("unsupported name characters never produce a successful PDF with missing text", async () => {
+  const text = "Łukasz Dvořák\n联系姓名：禕、𠮷\n真实项目经历";
+  const post = loadRoute();
+  const pdf = await post(exportRequest("pdf", text));
+  assert.equal(pdf.status, 422);
+  const message = (await pdf.json()).detail;
+  for (const character of ["Ł", "ř", "禕", "𠮷"]) assert.ok(message.includes(character));
+  assert.match(message, /DOCX/);
+  const docx = await post(exportRequest("docx", text));
+  assert.equal(docx.status, 200);
+  const extracted = await mammoth.extractRawText({ buffer: Buffer.from(await docx.arrayBuffer()) });
+  assert.equal(compact(extracted.value), compact(text));
+});
 
 test("PDF exports preserve Chinese, English and numbers using the bundled font on Windows and Linux", async () => {
   for (const platform of ["win32", "linux"]) {

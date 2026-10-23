@@ -140,6 +140,63 @@ test("only saves drafts on opt-in and restores their source after a reload", asy
   await expect(page.getByLabel("优化版简历正文")).toHaveValue(content);
 });
 
+test("a failed local draft recovery keeps an in-progress upload available", async ({ page }) => {
+  let release: () => void = () => {};
+  const pending = new Promise<void>((resolve) => { release = resolve; });
+  await page.route("**/api/resume/extract", async (route) => {
+    await pending;
+    await route.fulfill({ json: {
+      filename: "正在上传的简历.pdf", characters: 80, text: "真实项目经历和成果。".repeat(8),
+    } });
+  });
+  await page.goto("/");
+  const requested = page.waitForRequest("**/api/resume/extract");
+  await page.locator('input[type="file"]').setInputFiles({
+    name: "正在上传的简历.pdf", mimeType: "application/pdf", buffer: Buffer.from("%PDF-test"),
+  });
+  await requested;
+  await page.getByRole("button", { name: "恢复本机草稿" }).click();
+  await expect(page.locator(".error-message")).toContainText("没有找到可恢复的本机草稿");
+  await expect(page.getByText("正在读取简历", { exact: true })).toBeVisible();
+  release();
+  await expect(page.getByText("正在上传的简历.pdf", { exact: true })).toBeVisible();
+});
+
+test("discarding a recovered draft preview lets an in-progress upload finish", async ({ page }) => {
+  await generateSampleDraft(page);
+  const editor = page.getByLabel("优化版简历正文");
+  const original = await editor.inputValue();
+  await page.evaluate(() => localStorage.setItem("jobtailor:draft:v1", JSON.stringify({
+    version: 1,
+    draft: {
+      content: "已保存的其他草稿内容",
+      resume: { filename: "已保存的简历.pdf", characters: 80, text: "已保存的原简历内容" },
+      jobDescription: "已保存的目标岗位",
+    },
+  })));
+  await page.getByRole("button", { name: "移除简历" }).click();
+  let release: () => void = () => {};
+  const pending = new Promise<void>((resolve) => { release = resolve; });
+  await page.route("**/api/resume/extract", async (route) => {
+    await pending;
+    await route.fulfill({ json: {
+      filename: "新上传的简历.pdf", characters: 80, text: "新上传的真实项目经历和成果。".repeat(8),
+    } });
+  });
+  const requested = page.waitForRequest("**/api/resume/extract");
+  await page.locator('input[type="file"]').setInputFiles({
+    name: "新上传的简历.pdf", mimeType: "application/pdf", buffer: Buffer.from("%PDF-test"),
+  });
+  await requested;
+  await page.getByRole("button", { name: "恢复本机草稿" }).click();
+  await expect(page.getByRole("region", { name: "新版本对照" })).toContainText("已保存的其他草稿内容");
+  await expect(page.getByText("正在读取简历", { exact: true })).toBeVisible();
+  await page.getByRole("button", { name: "保留当前草稿" }).click();
+  release();
+  await expect(page.getByText("新上传的简历.pdf", { exact: true })).toBeVisible();
+  await expect(editor).toHaveValue(original);
+});
+
 test("ignores analysis results for a job description that has changed", async ({ page }) => {
   let release: () => void = () => {};
   const released = new Promise<void>((resolve) => { release = resolve; });
@@ -148,7 +205,9 @@ test("ignores analysis results for a job description that has changed", async ({
   await page.route("**/api/analyze", async (route) => {
     await released;
     await route.fulfill({ contentType: "application/x-ndjson", body: `${JSON.stringify({ type: "summary", data: {
-      analysis_mode: "local", score: 99, verdict: "旧岗位的诊断", dimensions: [], requirements: [], matched: [], gaps: [],
+      analysis_mode: "local", score: 99, verdict: "旧岗位的诊断",
+      dimensions: ["关键词覆盖", "经历证据", "岗位相关性", "表达清晰度"].map((name) => ({ name, score: 99, note: "旧岗位的诊断依据。" })),
+      requirements: [], matched: [], gaps: [],
     } })}\n${JSON.stringify({ type: "done" })}\n` });
     routeCompleted();
   });
@@ -332,4 +391,44 @@ test("cancels AI editing while preserving the original and allowing retry", asyn
   await expect(editor).toHaveValue(original);
   await expect(page.getByRole("button", { name: "应用 AI 修改" })).toBeEnabled();
   release();
+});
+
+test("cancelling a partial AI preview immediately restores editing and retry", async ({ page }) => {
+  await generateSampleDraft(page);
+  const editor = page.getByLabel("优化版简历正文");
+  const original = await editor.inputValue();
+  await page.evaluate(() => {
+    const originalFetch = window.fetch;
+    let refineCalls = 0;
+    window.fetch = async (...args) => {
+      if (args[0] !== "/api/resume/refine") return originalFetch(...args);
+      refineCalls++;
+      if (refineCalls > 1) {
+        const body = JSON.parse(String(args[1]?.body));
+        return new Response(`${body.content}\n重试后的完整修改`);
+      }
+      return new Response(new ReadableStream({
+        start(controller) {
+          controller.enqueue(new TextEncoder().encode("尚未完成的 AI 预览"));
+          args[1]?.signal?.addEventListener("abort", () => controller.error(new DOMException("请求已取消", "AbortError")), { once: true });
+        },
+      }));
+    };
+  });
+  await page.getByLabel("AI 修改要求").fill("精简项目");
+  await page.getByRole("button", { name: "应用 AI 修改" }).click();
+  const preview = page.getByRole("region", { name: "AI 修改预览" });
+  await expect(preview).toContainText("尚未完成的 AI 预览");
+  await page.getByRole("button", { name: "取消 AI 修改" }).click();
+  await expect(page.locator(".error-message")).toContainText("已取消");
+  await expect(preview).toHaveCount(0);
+  await expect(editor).toBeEnabled();
+  await expect(editor).toHaveValue(original);
+  const manuallyEdited = `${original}\n取消后补充的真实经历`;
+  await editor.fill(manuallyEdited);
+  await expect(page.getByRole("button", { name: "应用 AI 修改" })).toBeEnabled();
+  await page.getByRole("button", { name: "应用 AI 修改" }).click();
+  await expect(preview).toContainText("重试后的完整修改");
+  await expect(page.getByRole("button", { name: "替换当前草稿" })).toBeEnabled();
+  await expect(editor).toHaveValue(manuallyEdited);
 });

@@ -43,6 +43,8 @@ const SKILLS = [
 
 type SkillMatch = { skill: string; start: number; end: number };
 type LocalRequirement = { skills: string[]; importance: "required" | "preferred" };
+const chooseOnePattern = /任选|任[一意]|至少[一1]|其中之一|one\s+of|either/i;
+const preferredPattern = /优先|加分|更佳|preferred|nice[\s-]+to[\s-]+have|bonus/i;
 
 function findSkills(text: string): SkillMatch[] {
   const matches = SKILLS.flatMap(({ name, pattern }) => Array.from(text.matchAll(pattern), (match) => ({
@@ -56,21 +58,58 @@ function findSkills(text: string): SkillMatch[] {
   return completeMatches;
 }
 
+function findResumeSkills(text: string): SkillMatch[] {
+  const matches = findSkills(text);
+  const negativeBefore = /(?:(?:尚未|暂未|从未|未曾|不曾|没有|未)(?:实际)?(?:使用|用|接触|学习|掌握|熟悉|参与|开发|做)(?:过)?|不(?:太)?(?:会|熟悉|掌握|具备|了解|擅长)|(?:没有|并无|暂无|尚无|无|缺乏|缺少)(?:任何|相关)?|\b(?:no\s+experience\s+(?:with|in)|never\s+used|not\s+familiar\s+with))\s*$/i;
+  const negativeAfter = /^\s*(?:(?:均|都)\s*)?(?:(?:尚未|暂未|从未|未曾|没有|未)(?:实际)?(?:使用|用|接触|学习|掌握|熟悉)(?:过)?|不(?:太)?(?:会|熟悉|掌握|了解|擅长)|(?:项目)?经验(?:为零|为空|暂无|没有))/i;
+  const groups: SkillMatch[][] = [];
+  matches.forEach((match, index) => {
+    const previous = matches[index - 1];
+    const connector = previous ? text.slice(previous.end, match.start).trim() : "";
+    if (previous && /^(?:、|和|及|以及|或(?:者)?|and|or|\/|\|)$/i.test(connector)) groups.at(-1)!.push(match);
+    else groups.push([match]);
+  });
+  // A clear denial applies to its skill list, but cannot cross into a new assertion.
+  return groups.flatMap((group) => group.some((match) => {
+    const before = text.slice(0, match.start).split(/[\n\r。；;，,!?！？]|但(?:是)?|不过|然而/).at(-1) ?? "";
+    const after = text.slice(match.end).split(/[\n\r。；;，,!?！？]|但(?:是)?|不过|然而/)[0];
+    return negativeBefore.test(before) || negativeAfter.test(after);
+  }) ? [] : group);
+}
+
+function requirementClauses(jobDescription: string): string[] {
+  return jobDescription.split(/[\n。；;!?！？]+|\.(?=\s|$)/).flatMap((sentence) => {
+    const clauses = sentence.split(/[，,]/);
+    for (let index = 0; index < clauses.length; index++) {
+      if (!chooseOnePattern.test(clauses[index])) continue;
+      let start = index;
+      let end = index;
+      const beginsWithSkill = (clause: string) => findSkills(clause.trim())[0]?.start === 0;
+      const endsWithSkill = (clause: string) => findSkills(clause.trim()).at(-1)?.end === clause.trim().length;
+      while (start > 0 && beginsWithSkill(clauses[start]) && endsWithSkill(clauses[start - 1]) && !preferredPattern.test(clauses[start - 1])) start--;
+      while (end + 1 < clauses.length && endsWithSkill(clauses[end]) && beginsWithSkill(clauses[end + 1]) && !preferredPattern.test(clauses[end + 1])) end++;
+      if (start < end) clauses.splice(start, end - start + 1, clauses.slice(start, end + 1).join("、"));
+      index = start;
+    }
+    return clauses;
+  });
+}
+
 function localRequirements(jobDescription: string): LocalRequirement[] {
   const requirements = new Map<string, LocalRequirement>();
   let sectionImportance: LocalRequirement["importance"] = "required";
   const preferredHeading = /^(?:加分(?:项|条件)?|优先(?:项|条件)?|preferred(?:\s+(?:skills|qualifications))?|nice[\s-]+to[\s-]+have|bonus(?:\s+skills)?)\s*[:：]?$/i;
   const requiredHeading = /^(?:任职要求|岗位要求|职位要求|职责要求|基本要求|硬性要求|必备技能|必需技能|requirements?|required(?:\s+(?:skills|qualifications))?|must[\s-]+have)\s*[:：]?$/i;
-  const clauses = jobDescription.split(/[\n。；;，,!?！？]+|\.(?=\s|$)/);
+  const clauses = requirementClauses(jobDescription);
   for (const rawClause of clauses) {
     const clause = rawClause.trim().replace(/^[-•*\s]+/, "");
     const heading = clause.split(/[:：]/)[0];
     if (preferredHeading.test(heading)) sectionImportance = "preferred";
     else if (requiredHeading.test(heading)) sectionImportance = "required";
-    const importance = /优先|加分|更佳|preferred|nice[\s-]+to[\s-]+have|bonus/i.test(clause) ? "preferred" : sectionImportance;
+    const importance = preferredPattern.test(clause) ? "preferred" : sectionImportance;
     const matches = findSkills(clause);
     const groups: string[][] = [];
-    const chooseOne = /任选|任[一意]|至少[一1]|其中之一|one\s+of|either/i.test(clause);
+    const chooseOne = chooseOnePattern.test(clause);
     matches.forEach((match, index) => {
       const previous = matches[index - 1];
       const connector = previous ? clause.slice(previous.end, match.start).trim() : "";
@@ -94,7 +133,7 @@ function localRequirements(jobDescription: string): LocalRequirement[] {
 }
 
 const fragments = (text: string) => text.split(/[\n。；;]/).map((part) => part.trim().replace(/^[-•*\s]+/, "")).filter(Boolean);
-const hasSkill = (text: string, skill: string) => findSkills(text).some((match) => match.skill === skill);
+const hasSkill = (text: string, skill: string) => findResumeSkills(text).some((match) => match.skill === skill);
 const evidenceFor = (resume: string, skill: string) => fragments(resume).find((part) => hasSkill(part, skill)) ?? "简历中未找到直接证据";
 
 function buildRevisions(resume: string, role: string, matched: string[], gaps: string[]): Revision[] {
@@ -151,7 +190,7 @@ function buildRevisions(resume: string, role: string, matched: string[], gaps: s
 export function analyzeResume(resumeText: string, jobDescription: string): AnalyzeResult {
   const role = fragments(jobDescription).slice(0, 4).map((line) => line.replace(/^(岗位|职位|招聘职位|Job Title)\s*[:：]?\s*/i, "")).find((line) => line.length >= 2 && line.length <= 40) ?? "目标岗位";
   const requirements = localRequirements(jobDescription);
-  const resumeSkills = new Set(findSkills(resumeText).map((match) => match.skill));
+  const resumeSkills = new Set(findResumeSkills(resumeText).map((match) => match.skill));
   const required = requirements.filter((item) => item.importance === "required");
   const isCovered = (item: LocalRequirement) => item.skills.some((skill) => resumeSkills.has(skill));
   const matched = [...new Set(requirements.flatMap((item) => item.skills.filter((skill) => resumeSkills.has(skill))))];

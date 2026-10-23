@@ -40,6 +40,8 @@ Resume files are parsed in memory and are not stored. When AI mode is configured
 
 Drafts keep their original resume filename and target job description when the inputs change. Regenerating an existing draft opens a comparison before replacing it, and the previous version can be restored with Undo. Supplementary reminders cannot be directly applied as resume text.
 
+PDF export checks whether the bundled font can display every non-whitespace character. If a name or another character is unsupported, the app asks the user to download DOCX instead of silently producing a PDF with missing text.
+
 Drafts stay in the current page by default. Users can opt in to saving the draft text, source resume text, target job description, and previous version in this browser, then use “恢复本机草稿” after a reload. AI edits stay in a separate preview until the user confirms them. New numbers and technical terms, and added/rewritten/deleted lines, are marked as review cues rather than factual verification. Incomplete or empty previews cannot replace a draft. During AI editing, the saved copy keeps the original complete draft. “清除本机草稿” removes the browser copy without clearing the editor.
 
 Local matching recognizes a limited technical skill vocabulary, simple alternative groups, and required versus preferred skills. Missing preferred skills do not lower the score. When no supported required skills are recognized, no numeric match score is shown. This heuristic does not establish actual skill proficiency or overall suitability.

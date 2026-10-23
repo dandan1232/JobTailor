@@ -1,5 +1,6 @@
 import { Document, Packer, Paragraph, TextRun } from "docx";
 import PDFDocument from "pdfkit";
+import { create as readFont } from "fontkit";
 import { readFile } from "node:fs/promises";
 import { join } from "node:path";
 import { readJsonObject, validText, withApiProtection } from "@/lib/api-protection";
@@ -45,6 +46,11 @@ async function exportResume(request: Request) {
       font = await readFile(fontPath);
     } catch {
       throw new Error("PDF 导出字体不可用，请联系维护者检查部署文件。");
+    }
+    const face = readFont(font);
+    const unsupported = [...new Set([...content].filter((character) => !/\s/.test(character) && !face.hasGlyphForCodePoint(character.codePointAt(0)!)))];
+    if (unsupported.length) {
+      return Response.json({ detail: `PDF 字体暂不支持这些字符：${unsupported.slice(0, 12).join("、")}${unsupported.length > 12 ? "等" : ""}。请改为下载 DOCX，以完整保留姓名和正文。` }, { status: 422 });
     }
     const chunks: Buffer[] = [];
     const pdf = new PDFDocument({ size: "A4", margins: { top: 48, right: 54, bottom: 48, left: 54 } });

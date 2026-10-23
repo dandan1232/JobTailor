@@ -66,6 +66,56 @@ test('explicit choose-one lists and English or clauses form one requirement', ()
   assert.equal(english.gaps.length, 0);
 });
 
+test('comma-separated choose-one lists stay grouped without absorbing an adjacent bonus', () => {
+  const resume = '张三\n使用 Django 开发订单接口\n负责接口维护';
+  const single = analyzeResume(resume, '后端工程师\n熟悉 Django');
+  for (const comma of [',', '，']) {
+    for (const job of [
+      `后端工程师\n熟悉 FastAPI${comma} Django${comma} Spring Boot 中任意一种框架${comma} AWS 使用经验优先`,
+      `后端工程师\none of FastAPI${comma} Django${comma} Spring Boot${comma} AWS preferred`,
+    ]) {
+      const result = analyzeResume(resume, job);
+      assert.equal(result.requirements.length, 2);
+      assert.equal(requirement(result, 'FastAPI 或 Django 或 Spring Boot').status, 'pass');
+      assert.equal(requirement(result, 'AWS').importance, 'preferred');
+      assert.equal(requirement(result, 'AWS').status, 'missing');
+      assert.equal(result.gaps.length, 0);
+      assert.equal(result.score, single.score);
+    }
+  }
+});
+
+test('explicitly denied skills do not become matching evidence or claimed summary experience', () => {
+  for (const denial of ['未使用过 Java', '不熟悉Java', '没有 Java 经验', 'Java 从未使用过', 'Java 项目经验为零', 'never used Java', 'not familiar with Java']) {
+    const result = analyzeResume(`张三\n${denial}，主要负责 Python 数据处理\n工作经验 3 年`, '后端工程师\n必须熟悉 Java 和 Python');
+    assert.equal(requirement(result, 'Java').status, 'missing', denial);
+    assert.equal(requirement(result, 'Python').status, 'pass', denial);
+    assert.deepEqual(Array.from(result.matched, (item) => item.skill), ['Python']);
+    assert.deepEqual(Array.from(result.gaps, (item) => item.skill), ['Java']);
+    assert.doesNotMatch(result.revisions[0].revised, /Java/);
+    assert.match(result.revisions[0].revised, /已有经历涉及Python/);
+  }
+});
+
+test('a denial stops at a new affirmative assertion and can cover a pure skill list', () => {
+  for (const description of ['不熟悉Java但有Python开发经验', '不熟悉 Java，但是使用 Python 开发服务', '不熟悉 Java、Django，但有 Python 项目经验', 'Java、Django 均未使用过，但有 Python 项目经验']) {
+    const result = analyzeResume(`张三\n${description}\n负责数据处理`, '后端工程师\n必须熟悉 Java、Django 和 Python');
+    assert.equal(requirement(result, 'Java').status, 'missing', description);
+    assert.equal(requirement(result, 'Django').status, 'missing', description);
+    assert.equal(requirement(result, 'Python').status, 'pass', description);
+    assert.deepEqual(Array.from(result.matched, (item) => item.skill), ['Python']);
+  }
+});
+
+test('positive evidence remains usable after an earlier denial and unrelated empty fields', () => {
+  const resume = '张三\n早期未使用过 Java\n后来使用 Java 开发订单服务\n证书：无\nPython 数据处理项目';
+  const result = analyzeResume(resume, '后端工程师\n必须熟悉 Java 和 Python');
+  assert.equal(requirement(result, 'Java').status, 'pass');
+  assert.equal(requirement(result, 'Java').evidence, '后来使用 Java 开发订单服务');
+  assert.equal(requirement(result, 'Python').status, 'pass');
+  assert.equal(result.gaps.length, 0);
+});
+
 test('AWS preferred does not turn adjacent required skills into bonuses or reduce their score', () => {
   const resume = '张三\n使用 Docker 和 K8s 部署服务\n负责日常维护';
   const result = analyzeResume(resume, '后端工程师\n熟悉 Docker、Kubernetes，有 AWS 使用经验优先');

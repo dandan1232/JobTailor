@@ -123,6 +123,12 @@ export function createApiProtection(options: { now?: () => number; maxClients?: 
     for (const [id, client] of state.clients) {
       if (time - client.touchedAt >= CLIENT_LIFETIME_MS && client.ai.active === 0 && client.local.active === 0) state.clients.delete(id);
     }
+    const group: Group = operation === "analyze" || operation === "refine" ? "ai" : "local";
+    const limits = API_LIMITS[group];
+    const global = state[group];
+    resetWindow(global, time, limits.globalWindowMs);
+    if (global.requests >= limits.globalRequests) return errorResponse("服务本小时的使用额度已用完，请稍后再试。", 429, Math.max(1, Math.ceil((global.startedAt + limits.globalWindowMs - time) / 1000)));
+    if (global.active >= limits.globalConcurrent) return errorResponse("正在处理的请求较多，请等待当前操作完成后重试。", 429, 5);
     let client = state.clients.get(identity.id);
     if (!client) {
       if (state.clients.size >= (options.maxClients ?? MAX_CLIENTS)) return errorResponse("当前访问人数较多，请稍后再试。", 429, 60);
@@ -130,18 +136,14 @@ export function createApiProtection(options: { now?: () => number; maxClients?: 
       state.clients.set(identity.id, client);
     }
     client.touchedAt = time;
-    const group: Group = operation === "analyze" || operation === "refine" ? "ai" : "local";
-    const limits = API_LIMITS[group];
     const local = client[group];
-    const global = state[group];
     resetWindow(local, time, limits.clientWindowMs);
-    resetWindow(global, time, limits.globalWindowMs);
     if (local.requests >= limits.clientRequests) return errorResponse("操作过于频繁，请稍后再试。", 429, Math.max(1, Math.ceil((local.startedAt + limits.clientWindowMs - time) / 1000)));
-    if (global.requests >= limits.globalRequests) return errorResponse("服务本小时的使用额度已用完，请稍后再试。", 429, Math.max(1, Math.ceil((global.startedAt + limits.globalWindowMs - time) / 1000)));
-    if (local.active >= limits.clientConcurrent || global.active >= limits.globalConcurrent) return errorResponse("正在处理的请求较多，请等待当前操作完成后重试。", 429, 5);
+    if (local.active >= limits.clientConcurrent) return errorResponse("正在处理的请求较多，请等待当前操作完成后重试。", 429, 5);
     local.requests++; global.requests++; local.active++; global.active++;
     const controller = new AbortController();
     let reader: ReadableStreamDefaultReader<Uint8Array> | undefined;
+    let cancellation: Promise<void> | undefined;
     let released = false;
     const release = () => {
       if (released) return;
@@ -150,10 +152,15 @@ export function createApiProtection(options: { now?: () => number; maxClients?: 
       clearTimeout(timeout);
       request.signal.removeEventListener("abort", abort);
     };
+    const cancelResponse = (reason: unknown) => {
+      if (!reader) return Promise.resolve();
+      cancellation ??= reader.cancel(reason);
+      return cancellation;
+    };
     const abort = () => {
       controller.abort(request.signal.reason ?? new Error("请求已取消或超时"));
-      if (reader) void reader.cancel(controller.signal.reason).catch(() => {});
-      release();
+      // A handler such as PDF parsing may not stop on abort; keep its lease until it settles.
+      if (reader) void cancelResponse(controller.signal.reason).then(release, release);
     };
     const timeout = setTimeout(abort, REQUEST_TIMEOUT_MS);
     timeout.unref?.();
@@ -169,7 +176,7 @@ export function createApiProtection(options: { now?: () => number; maxClients?: 
       reader = response.body.getReader();
       const responseReader = reader;
       if (controller.signal.aborted) {
-        void responseReader.cancel(controller.signal.reason).catch(() => {});
+        await cancelResponse(controller.signal.reason).catch(() => {});
         release();
         return errorResponse("请求已取消或超时，请重试。", 408);
       }
@@ -177,14 +184,21 @@ export function createApiProtection(options: { now?: () => number; maxClients?: 
         async pull(output) {
           try {
             const next = await responseReader.read();
-            if (next.done) { release(); output.close(); }
+            if (next.done) {
+              // cancel() closes pending reads before its asynchronous cleanup finishes.
+              if (cancellation) await cancellation;
+              release(); output.close();
+            }
             else output.enqueue(next.value);
-          } catch (error) { release(); output.error(error); }
+          } catch (error) {
+            if (cancellation) await cancellation.catch(() => {});
+            release(); output.error(error);
+          }
         },
         async cancel(reason) {
           controller.abort(reason);
-          release();
-          await responseReader.cancel(reason);
+          try { await cancelResponse(reason); }
+          finally { release(); }
         },
       });
       return new Response(stream, { status: response.status, statusText: response.statusText, headers: responseHeaders });

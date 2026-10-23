@@ -30,6 +30,13 @@ test("also marks deleted experience so the original facts stay visible during re
   assert.equal(result.originalLines[1].changed, true);
 });
 
+test("marks an added or removed occurrence even when another identical line remains", () => {
+  const original = "姓名\n负责 Python 服务\n负责 Python 服务";
+  const revised = "姓名\n负责 Python 服务";
+  assert.deepEqual(Array.from(reviewResumeChanges(original, revised).originalLines, (line) => line.changed), [false, false, true]);
+  assert.deepEqual(Array.from(reviewResumeChanges(revised, original).lines, (line) => line.changed), [false, false, true]);
+});
+
 test("handles C++ and C# terms, repeated numbers, empty text and literal markup safely", () => {
   const result = reviewResumeChanges("", "使用 C++ 和 C#，100%，100%\n<script>文字</script>");
   assert.deepEqual(Array.from(result.addedNumbers), ["100%"]);

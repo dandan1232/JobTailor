@@ -284,8 +284,6 @@ export function JobWorkspace() {
   }
 
   function restoreLocalDraft() {
-    uploadVersionRef.current++;
-    setUploading(false);
     try {
       const saved = JSON.parse(localStorage.getItem(DRAFT_STORAGE_KEY) ?? "null");
       const restored = saved?.draft;
@@ -296,6 +294,8 @@ export function JobWorkspace() {
       if (draft) {
         setPendingDraft(restored);
       } else {
+        uploadVersionRef.current++;
+        setUploading(false);
         invalidateAnalysis();
         setResume(restored.resume);
         setJobDescription(restored.jobDescription);
@@ -539,6 +539,7 @@ export function JobWorkspace() {
       setPendingDraft({ ...draft, content: cleaned, operation: "refine", complete: true });
       setSuccessMessage("AI 修改预览已准备好，请核对改动后再替换当前草稿。");
     } catch (refineError) {
+      if (controller.signal.aborted) setPendingDraft(null);
       setError(`${controller.signal.aborted ? "本次 AI 修改已取消。" : errorMessage(refineError, "AI 修改未完成")} 原稿保持不变，未完成的预览不能应用。`);
     } finally {
       refineBaseRef.current = null;
