@@ -10,6 +10,9 @@ const nextConfig: NextConfig = {
       "./node_modules/pdfjs-dist/legacy/build/pdf.worker.mjs",
       "./node_modules/@napi-rs/**/*",
     ],
+    "/api/resume/export": [
+      "./node_modules/@fontsource/noto-sans-sc/files/noto-sans-sc-chinese-simplified-400-normal.woff",
+    ],
   },
 };
 

@@ -1,5 +1,6 @@
 import { Document, Packer, Paragraph, TextRun } from "docx";
 import PDFDocument from "pdfkit";
+import { readFile } from "node:fs/promises";
 import { join } from "node:path";
 
 export const runtime = "nodejs";
@@ -31,12 +32,18 @@ export async function POST(request: Request) {
       return new Response(new Uint8Array(buffer), { headers: { "Content-Type": "application/vnd.openxmlformats-officedocument.wordprocessingml.document", "Content-Disposition": `attachment; filename*=UTF-8''${encodeURIComponent(`${base}-优化版.docx`)}` } });
     }
 
+    const fontPath = join(process.cwd(), "node_modules/@fontsource/noto-sans-sc/files/noto-sans-sc-chinese-simplified-400-normal.woff");
+    let font: Buffer;
+    try {
+      font = await readFile(fontPath);
+    } catch {
+      throw new Error("PDF 导出字体不可用，请联系维护者检查部署文件。");
+    }
     const chunks: Buffer[] = [];
     const pdf = new PDFDocument({ size: "A4", margins: { top: 48, right: 54, bottom: 48, left: 54 } });
     pdf.on("data", (chunk: Buffer) => chunks.push(chunk));
     const completed = new Promise<Buffer>((resolve, reject) => { pdf.on("end", () => resolve(Buffer.concat(chunks))); pdf.on("error", reject); });
-    const fontPath = process.platform === "win32" ? "C:/Windows/Fonts/msyh.ttc" : join(process.cwd(), "node_modules/@fontsource/noto-sans-sc/files/noto-sans-sc-chinese-simplified-400-normal.woff");
-    pdf.registerFont("Resume", fontPath);
+    pdf.registerFont("Resume", font);
     pdf.font("Resume").fillColor("#17252A");
     lines.forEach((line, index) => {
       if (!line) return pdf.moveDown(0.55);

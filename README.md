@@ -38,12 +38,17 @@ AI_MODEL=your-model
 
 Resume files are parsed in memory and are not stored. When AI mode is configured, extracted resume text and the pasted job description are sent to the configured model provider only after the user starts an analysis.
 
+Drafts keep their original resume filename and target job description when the inputs change. Regenerating an existing draft opens a comparison before replacing it, and the previous version can be restored with Undo. Supplementary reminders cannot be directly applied as resume text.
+
+Drafts stay in the current page by default. Users can opt in to saving the draft text, source resume text, target job description, and previous version in this browser, then use “恢复本机草稿” after a reload. During AI editing, the saved copy keeps the last complete version. “清除本机草稿” removes the browser copy without clearing the editor.
+
 ## Checks
 
 ```powershell
 npm run lint
+node --test tests/*.test.mjs
 npm run build
-npm run test:e2e
+npm run test:e2e -- workspace.spec.ts
 ```
 
 ## Deploy with Docker Compose

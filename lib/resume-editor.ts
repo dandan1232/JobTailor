@@ -72,6 +72,9 @@ export function applyAcceptedRevisions(original: string, revisions: Revision[]):
     positions.push(index);
   }
   const edits = revisions.map((revision) => {
+    if (revision.kind === "reminder") {
+      throw new Error("待补充提醒不能直接写入简历，请先补充真实经历后重新分析。");
+    }
     if (typeof revision.original !== "string" || typeof revision.revised !== "string" || !revision.original.trim() || !revision.revised.trim()) {
       throw new Error("建议缺少可替换的原文或修改内容，请重新分析。");
     }

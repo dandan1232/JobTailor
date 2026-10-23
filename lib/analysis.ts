@@ -4,6 +4,7 @@ export type Evidence = { skill: string; evidence: string };
 export type Gap = { skill: string; suggestion: string };
 export type Revision = {
   id: string;
+  kind?: "replacement" | "reminder";
   priority: "高" | "中" | "低";
   category: string;
   title: string;
@@ -35,16 +36,28 @@ const evidenceFor = (resume: string, skill: string) => fragments(resume).find((p
 
 function buildRevisions(resume: string, role: string, matched: string[], gaps: string[]): Revision[] {
   const projectLine = fragments(resume).find((line) => /\d/.test(line)) ?? fragments(resume)[0] ?? "尚未识别到可用项目描述";
-  const skillSummary = matched.slice(0, 4).join("、") || "相关技术";
+  const openingLine = resume.split(/\r?\n/).find((line) => line.trim())?.trim() ?? "";
+  const normalizedResume = resume.replace(/\s/g, "");
+  const openingTarget = openingLine.replace(/\s/g, "");
+  const openingStart = normalizedResume.indexOf(openingTarget);
+  const canReplaceOpening = openingTarget.length > 0 && openingStart >= 0 && normalizedResume.indexOf(openingTarget, openingStart + 1) < 0;
+  const skillSummary = matched.slice(0, 4).join("、");
+  const roleLabel = role === "目标岗位" ? role : `${role}岗位`;
   const revisions: Revision[] = [
     {
       id: "summary-focus", priority: "高", category: "个人摘要", title: "让开头直接回应目标岗位",
-      original: resume.split("\n").find((line) => line.trim()) ?? resume,
-      revised: `${resume.split("\n").find((line) => line.trim()) ?? resume}\n面向${role}岗位，已有经历涉及${skillSummary}。`,
-      reason: "招聘方通常先扫描顶部摘要。先说明岗位方向和已有证据，能更快建立相关性。",
+      kind: canReplaceOpening ? "replacement" : "reminder",
+      original: openingLine || "尚未识别到开头内容。",
+      revised: canReplaceOpening
+        ? `${openingLine}\n面向${roleLabel}${skillSummary ? `，已有经历涉及${skillSummary}` : ""}。`
+        : "先确认需要修改的开头段落，保留姓名与已有事实，再补充目标岗位和有真实证据的技能。",
+      reason: canReplaceOpening
+        ? "招聘方通常先扫描顶部摘要。先说明岗位方向和已有证据，能更快建立相关性。"
+        : "开头为空或有多处相同文字，需要先确认要修改的位置。",
     },
     {
       id: "project-result", priority: "中", category: "项目经历", title: "把项目描述改成动作与结果",
+      kind: "reminder",
       original: projectLine,
       revised: `围绕业务目标说明具体动作、技术选择和可验证结果。原始证据：${projectLine}`,
       reason: "只罗列职责很难判断贡献大小，动作、技术选择和结果更容易被追问和验证。",
@@ -54,6 +67,7 @@ function buildRevisions(resume: string, role: string, matched: string[], gaps: s
     const missing = gaps.slice(0, 3).join("、");
     revisions.splice(1, 0, {
       id: "skill-gap", priority: "高", category: "技能缺口", title: `确认 ${missing} 是否有真实证据`,
+      kind: "reminder",
       original: `JD 要求 ${missing}，当前简历没有找到直接证据。`,
       revised: `如果真实使用过 ${missing}，补充对应项目、职责和结果；如果没有，不要为了匹配度强行加入。`,
       reason: "缺少证据的关键词容易在面试追问时失真，这里应补真实经历，而不是补漂亮话。",
@@ -62,6 +76,7 @@ function buildRevisions(resume: string, role: string, matched: string[], gaps: s
   if (!fragments(resume).some((line) => /%|\d+\s*(秒|人|次|万|小时|天)/.test(line))) {
     revisions.push({
       id: "quantify-impact", priority: "中", category: "结果表达", title: "补充可核实的结果",
+      kind: "reminder",
       original: "多数经历没有结果数据或明确影响。",
       revised: "有真实记录时补充性能、效率、规模或交付结果；没有准确数字时使用定性结果，不要编造。",
       reason: "结果证据能区分‘参与过’和‘真正产生过影响’。",

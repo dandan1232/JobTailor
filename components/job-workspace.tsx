@@ -30,6 +30,7 @@ type Requirement = { label: string; status: "pass" | "missing"; evidence: string
 type Evidence = { skill: string; evidence: string };
 type Gap = { skill: string; suggestion: string };
 type Revision = {
+  kind?: "replacement" | "reminder";
   id: string;
   priority: "高" | "中" | "低";
   category: string;
@@ -49,9 +50,11 @@ type AnalyzeResult = {
   revisions: Revision[];
 };
 type ResumeFile = { filename: string; characters: number; text: string };
+type ResumeDraft = { content: string; resume: ResumeFile; jobDescription: string };
 type WorkPhase = { label: string; detail: string; icon: "scan" | "spark" | "write" | "check" };
 
 const API_URL = "";
+const DRAFT_STORAGE_KEY = "jobtailor:draft:v1";
 
 const sampleResume = `陈默｜Python 后端工程师｜3 年经验
 
@@ -72,6 +75,14 @@ const sampleJob = `岗位：Python 后端工程师
 
 function errorMessage(error: unknown, fallback: string): string {
   return error instanceof Error ? error.message : fallback;
+}
+
+function isResumeDraft(value: unknown): value is ResumeDraft {
+  if (!value || typeof value !== "object") return false;
+  const candidate = value as Partial<ResumeDraft>;
+  return typeof candidate.content === "string" && Boolean(candidate.content.trim())
+    && typeof candidate.jobDescription === "string" && typeof candidate.resume?.filename === "string"
+    && typeof candidate.resume.text === "string" && typeof candidate.resume.characters === "number";
 }
 
 async function readResumeResponse(response: Response): Promise<ResumeFile> {
@@ -147,6 +158,9 @@ function PhaseGlyph({ icon }: { icon: WorkPhase["icon"] }) {
 export function JobWorkspace() {
   const fileInputRef = useRef<HTMLInputElement>(null);
   const suggestionsRef = useRef<HTMLElement>(null);
+  const analysisVersionRef = useRef(0);
+  const uploadVersionRef = useRef(0);
+  const refineBaseRef = useRef<ResumeDraft | null>(null);
   const [mobileNavOpen, setMobileNavOpen] = useState(false);
   const [resume, setResume] = useState<ResumeFile | null>(null);
   const [jobDescription, setJobDescription] = useState("");
@@ -157,8 +171,10 @@ export function JobWorkspace() {
   const [error, setError] = useState("");
   const [successMessage, setSuccessMessage] = useState("");
   const [revisionStates, setRevisionStates] = useState<Record<string, "accepted" | "dismissed">>({});
-  const [generatedResume, setGeneratedResume] = useState("");
-  const [resumeHistory, setResumeHistory] = useState<string[]>([]);
+  const [draft, setDraft] = useState<ResumeDraft | null>(null);
+  const [pendingDraft, setPendingDraft] = useState<ResumeDraft | null>(null);
+  const [resumeHistory, setResumeHistory] = useState<ResumeDraft[]>([]);
+  const [saveDraftLocally, setSaveDraftLocally] = useState(false);
   const [aiInstruction, setAiInstruction] = useState("");
   const [generatingResume, setGeneratingResume] = useState(false);
   const [refiningResume, setRefiningResume] = useState(false);
@@ -167,7 +183,80 @@ export function JobWorkspace() {
   const [generationPhase, setGenerationPhase] = useState(0);
   const [refinePhase, setRefinePhase] = useState(0);
 
-  const acceptedRevisions = result?.revisions.filter((revision) => revisionStates[revision.id] === "accepted") ?? [];
+  const generatedResume = draft?.content ?? "";
+  const editorBusy = generatingResume || refiningResume;
+  const draftMatchesInput = Boolean(draft && resume && draft.resume.text === resume.text && draft.resume.filename === resume.filename && draft.jobDescription === jobDescription);
+  const acceptedRevisions = result?.revisions.filter((revision) => revision.kind !== "reminder" && revisionStates[revision.id] === "accepted") ?? [];
+
+  useEffect(() => {
+    if (!saveDraftLocally || !draft) return;
+    const timer = window.setTimeout(() => {
+      try {
+        localStorage.setItem(DRAFT_STORAGE_KEY, JSON.stringify({ version: 1, draft: refineBaseRef.current ?? draft, previous: resumeHistory.at(-1) }));
+      } catch {
+        setSaveDraftLocally(false);
+        setError("本机草稿保存失败，当前内容仍在编辑区，请及时下载。");
+      }
+    }, 250);
+    return () => window.clearTimeout(timer);
+  }, [draft, saveDraftLocally, resumeHistory, refiningResume]);
+
+  useEffect(() => {
+    if (!draft) return;
+    const warnBeforeLeaving = (event: BeforeUnloadEvent) => {
+      if (saveDraftLocally) {
+        try {
+          localStorage.setItem(DRAFT_STORAGE_KEY, JSON.stringify({ version: 1, draft: refineBaseRef.current ?? draft, previous: resumeHistory.at(-1) }));
+          return;
+        } catch { /* Warn before leaving if the latest draft cannot be saved. */ }
+      }
+      event.preventDefault();
+    };
+    window.addEventListener("beforeunload", warnBeforeLeaving);
+    return () => window.removeEventListener("beforeunload", warnBeforeLeaving);
+  }, [draft, saveDraftLocally, resumeHistory]);
+
+  function invalidateAnalysis() {
+    analysisVersionRef.current++;
+    setResult(null);
+    setRevisionStates({});
+    setAnalyzing(false);
+    setPendingDraft(null);
+    setSuccessMessage("");
+  }
+
+  function applyDraft(next: ResumeDraft) {
+    if (draft) setResumeHistory((history) => [...history, draft]);
+    setDraft(next);
+    setPendingDraft(null);
+    setAiInstruction("");
+    setSuccessMessage("优化版简历已生成，可以直接编辑或下载。");
+  }
+
+  function restoreLocalDraft() {
+    uploadVersionRef.current++;
+    setUploading(false);
+    try {
+      const saved = JSON.parse(localStorage.getItem(DRAFT_STORAGE_KEY) ?? "null");
+      const restored = saved?.draft;
+      if (saved?.version !== 1 || !isResumeDraft(restored)) {
+        throw new Error("没有找到可恢复的本机草稿。");
+      }
+      setError("");
+      if (draft) {
+        setPendingDraft(restored);
+      } else {
+        invalidateAnalysis();
+        setResume(restored.resume);
+        setJobDescription(restored.jobDescription);
+        applyDraft(restored);
+        setResumeHistory(isResumeDraft(saved.previous) ? [saved.previous] : []);
+        setSuccessMessage("本机草稿已恢复，可以继续编辑或下载。");
+      }
+    } catch (restoreError) {
+      setError(errorMessage(restoreError, "本机草稿暂时无法读取。"));
+    }
+  }
 
   useEffect(() => {
     if (!analyzing) return;
@@ -194,10 +283,12 @@ export function JobWorkspace() {
   }, [result?.revisions.length]);
 
   async function uploadResume(file: File) {
+    if (editorBusy) return;
+    const uploadVersion = ++uploadVersionRef.current;
+    setUploading(false);
     setError("");
     setSuccessMessage("");
-    setResult(null);
-    setRevisionStates({});
+    invalidateAnalysis();
 
     const suffix = file.name.toLowerCase().split(".").pop();
     if (!suffix || !["pdf", "docx"].includes(suffix)) {
@@ -214,11 +305,12 @@ export function JobWorkspace() {
       const formData = new FormData();
       formData.append("file", file);
       const response = await fetch(`${API_URL}/api/resume/extract`, { method: "POST", body: formData });
-      setResume(await readResumeResponse(response));
+      const uploaded = await readResumeResponse(response);
+      if (uploadVersion === uploadVersionRef.current) setResume(uploaded);
     } catch (uploadError) {
-      setError(errorMessage(uploadError, "简历读取失败，请稍后重试。"));
+      if (uploadVersion === uploadVersionRef.current) setError(errorMessage(uploadError, "简历读取失败，请稍后重试。"));
     } finally {
-      setUploading(false);
+      if (uploadVersion === uploadVersionRef.current) setUploading(false);
     }
   }
 
@@ -236,16 +328,18 @@ export function JobWorkspace() {
   }
 
   function loadSample() {
+    uploadVersionRef.current++;
+    setUploading(false);
+    invalidateAnalysis();
     setResume({ filename: "示例-后端工程师简历.pdf", characters: sampleResume.length, text: sampleResume });
     setJobDescription(sampleJob);
-    setResult(null);
-    setRevisionStates({});
     setError("");
   }
 
   async function handleAnalyze(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
-    if (!resume) return;
+    if (!resume || editorBusy) return;
+    const analysisVersion = ++analysisVersionRef.current;
 
     setError("");
     setAnalysisPhase(0);
@@ -258,6 +352,10 @@ export function JobWorkspace() {
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ resume_text: resume.text, job_description: jobDescription }),
       }, 180_000);
+      if (analysisVersion !== analysisVersionRef.current) {
+        await response.body?.cancel();
+        return;
+      }
       if (!response.ok) {
         const body = await response.json();
         throw new Error(body.detail ?? "分析服务暂时不可用");
@@ -269,6 +367,10 @@ export function JobWorkspace() {
       let buffer = "";
       while (true) {
         const { done, value } = await reader.read();
+        if (analysisVersion !== analysisVersionRef.current) {
+          await reader.cancel();
+          return;
+        }
         buffer += decoder.decode(value ?? new Uint8Array(), { stream: !done });
         const lines = buffer.split("\n");
         buffer = lines.pop() ?? "";
@@ -288,19 +390,25 @@ export function JobWorkspace() {
         if (done) break;
       }
     } catch (analysisError) {
-      setError(errorMessage(analysisError, "无法连接分析服务，请确认后端已经启动。"));
+      if (analysisVersion === analysisVersionRef.current) setError(errorMessage(analysisError, "无法连接分析服务，请确认后端已经启动。"));
     } finally {
-      setAnalyzing(false);
+      if (analysisVersion === analysisVersionRef.current) setAnalyzing(false);
     }
   }
 
-  function setRevisionState(id: string, state: "accepted" | "dismissed") {
-    setRevisionStates((current) => ({ ...current, [id]: state }));
+  function setRevisionState(id: string, state?: "accepted" | "dismissed") {
+    setRevisionStates((current) => {
+      const next = { ...current };
+      if (state) next[id] = state;
+      else delete next[id];
+      return next;
+    });
+    setPendingDraft(null);
     setSuccessMessage(state === "accepted" ? "建议已选中，点击“重新生成简历”后写入正文。" : "");
   }
 
   async function regenerateResume() {
-    if (!resume || !acceptedRevisions.length) return;
+    if (!resume || !acceptedRevisions.length || editorBusy) return;
     setGenerationPhase(0);
     setGeneratingResume(true);
     setError("");
@@ -317,10 +425,14 @@ export function JobWorkspace() {
       }
       const content = await readTextStream(response, () => {});
       if (!content) throw new Error("模型没有返回简历内容");
-      setResumeHistory(generatedResume ? [generatedResume] : []);
-      setGeneratedResume(content.replace(/^```(?:text|markdown)?\s*|\s*```$/g, ""));
+      const nextDraft = { content: content.replace(/^```(?:text|markdown)?\s*|\s*```$/g, ""), resume, jobDescription };
+      if (draft) {
+        setPendingDraft(nextDraft);
+        setSuccessMessage("新版本已准备好，请对照后决定是否替换当前草稿。");
+      } else {
+        applyDraft(nextDraft);
+      }
       requestAnimationFrame(() => document.querySelector("#resume-editor")?.scrollIntoView({ behavior: "smooth", block: "start" }));
-      setSuccessMessage("优化版简历已生成，可以直接编辑或下载。");
     } catch (generateError) {
       setError(`${errorMessage(generateError, "简历生成失败")} 编辑区仍保留上一次版本。`);
     } finally {
@@ -330,7 +442,8 @@ export function JobWorkspace() {
 
   async function refineGeneratedResume(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
-    if (!generatedResume || !aiInstruction.trim()) return;
+    if (!draft || !generatedResume || !aiInstruction.trim() || editorBusy || pendingDraft) return;
+    refineBaseRef.current = draft;
     setRefinePhase(0);
     setRefiningResume(true);
     setError("");
@@ -345,36 +458,38 @@ export function JobWorkspace() {
         const body = await response.json();
         throw new Error(body.detail ?? "AI 修改失败");
       }
-      const previous = generatedResume;
+      const previous = draft;
       setResumeHistory((history) => [...history, previous]);
-      const content = await readTextStream(response, setGeneratedResume);
+      const content = await readTextStream(response, (text) => setDraft({ ...previous, content: text }));
       if (!content) throw new Error("模型没有返回修改内容");
-      setGeneratedResume(content.replace(/^```(?:text|markdown)?\s*|\s*```$/g, ""));
+      setDraft({ ...previous, content: content.replace(/^```(?:text|markdown)?\s*|\s*```$/g, "") });
       setAiInstruction("");
       setSuccessMessage("AI 修改已完成，右侧编辑区已更新。你可以继续修改或撤销。");
     } catch (refineError) {
       setError(`${errorMessage(refineError, "AI 修改失败")} 已返回的部分会保留，可撤销后重试。`);
     } finally {
+      refineBaseRef.current = null;
       setRefiningResume(false);
     }
   }
 
   function undoResumeChange() {
-    setResumeHistory((history) => {
-      const previous = history.at(-1);
-      if (previous) setGeneratedResume(previous);
-      return history.slice(0, -1);
-    });
+    if (editorBusy) return;
+    const previous = resumeHistory.at(-1);
+    if (!previous) return;
+    setDraft(previous);
+    setResumeHistory((history) => history.slice(0, -1));
+    setPendingDraft(null);
   }
 
   async function downloadResume(format: "docx" | "pdf") {
-    if (!generatedResume || !resume) return;
+    if (!draft || !generatedResume.trim() || editorBusy) return;
     setExporting(format);
     try {
       const response = await fetch("/api/resume/export", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ content: generatedResume, format, filename: resume.filename }),
+        body: JSON.stringify({ content: generatedResume, format, filename: draft.resume.filename }),
       });
       if (!response.ok) {
         const body = await response.json();
@@ -383,7 +498,7 @@ export function JobWorkspace() {
       const url = URL.createObjectURL(await response.blob());
       const link = document.createElement("a");
       link.href = url;
-      link.download = `${resume.filename.replace(/\.(pdf|docx)$/i, "")}-优化版.${format}`;
+      link.download = `${draft.resume.filename.replace(/\.(pdf|docx)$/i, "")}-优化版.${format}`;
       link.click();
       URL.revokeObjectURL(url);
     } catch (exportError) {
@@ -439,21 +554,24 @@ export function JobWorkspace() {
             <p className="eyebrow">AI 简历诊断</p>
             <h1>让简历对准岗位，而不是堆关键词</h1>
           </div>
-          <div className="privacy-state"><ShieldCheck size={15} /> 文件解析后不落盘</div>
+          <div className="privacy-state"><ShieldCheck size={15} /> 原文件仅在内存解析</div>
         </header>
 
         <form className="analysis-grid" id="source" onSubmit={handleAnalyze}>
           <section className="source-panel">
             <div className="panel-heading">
               <div><span className="step-label">分析资料</span><h2>简历与目标岗位</h2></div>
-              <button className="text-button" type="button" onClick={loadSample}>载入示例</button>
+              <div className="draft-controls">
+                <button className="text-button" type="button" disabled={editorBusy} onClick={restoreLocalDraft}>恢复本机草稿</button>
+                <button className="text-button" type="button" disabled={editorBusy} onClick={loadSample}>载入示例</button>
+              </div>
             </div>
 
             {resume ? (
               <div className="uploaded-file">
                 <span className="file-icon"><FileCheck2 size={21} /></span>
                 <div><strong>{resume.filename}</strong><small>已提取 {resume.characters} 个字符</small></div>
-                <button className="icon-button" type="button" aria-label="移除简历" title="移除简历" onClick={() => { setResume(null); setResult(null); }}>
+                <button className="icon-button" type="button" disabled={editorBusy} aria-label="移除简历" title="移除简历" onClick={() => { uploadVersionRef.current++; setUploading(false); setResume(null); invalidateAnalysis(); }}>
                   <Trash2 size={17} />
                 </button>
               </div>
@@ -465,7 +583,7 @@ export function JobWorkspace() {
                 onDragLeave={() => setDragActive(false)}
                 onDrop={handleDrop}
               >
-                <input ref={fileInputRef} type="file" accept=".pdf,.docx" onChange={handleFileChange} />
+                <input ref={fileInputRef} type="file" accept=".pdf,.docx" disabled={editorBusy} onChange={handleFileChange} />
                 {uploading ? <LoaderCircle className="spin" size={24} /> : <UploadCloud size={24} />}
                 <strong>{uploading ? "正在读取简历" : "上传简历"}</strong>
                 <span>拖放或点击选择 PDF / DOCX，最大 5MB</span>
@@ -483,7 +601,8 @@ export function JobWorkspace() {
               <span className="field-title"><span>目标岗位 JD</span><span>{jobDescription.length} 字</span></span>
               <textarea
                 value={jobDescription}
-                onChange={(event) => { setJobDescription(event.target.value); setResult(null); }}
+                onChange={(event) => { setJobDescription(event.target.value); invalidateAnalysis(); }}
+                disabled={editorBusy}
                 rows={11}
                 minLength={30}
                 placeholder="粘贴完整职位描述，包括职责、技能和经验要求"
@@ -494,7 +613,7 @@ export function JobWorkspace() {
             {error ? <p className="error-message"><AlertTriangle size={16} />{error}</p> : null}
             {successMessage ? <p className="success-message"><CheckCircle2 size={16} />{successMessage}</p> : null}
 
-            <button className="primary-button" type="submit" disabled={!resume || jobDescription.trim().length < 30 || analyzing || uploading}>
+            <button className="primary-button" type="submit" disabled={!resume || jobDescription.trim().length < 30 || analyzing || uploading || editorBusy}>
               <span className="button-icon">{analyzing ? <LoaderCircle className="spin" size={18} /> : <ScanSearch size={18} />}</span>
               <span>{analyzing ? "正在分析简历与岗位" : "开始匹配分析"}</span>
               <span className="button-icon">{analyzing ? null : <ArrowRight size={18} />}</span>
@@ -571,24 +690,28 @@ export function JobWorkspace() {
                     <div className="revision-meta">
                       <span className={`priority priority-${revision.priority}`}>{revision.priority}优先级</span>
                       <span>{revision.category}</span>
+                      {revision.kind === "reminder" ? <span>待补充提醒</span> : null}
                     </div>
                     <div className="revision-content">
                       <div className="revision-title"><h3>{revision.title}</h3><p>{revision.reason}</p></div>
                       <div className="comparison-grid">
-                        <div className="comparison original-copy"><span>当前内容</span><p>{revision.original}</p></div>
-                        <div className="comparison revised-copy"><span>建议调整</span><p>{revision.revised}</p></div>
+                        <div className="comparison original-copy"><span>{revision.kind === "reminder" ? "当前情况" : "当前内容"}</span><p>{revision.original}</p></div>
+                        <div className="comparison revised-copy"><span>{revision.kind === "reminder" ? "补充方向（不会直接写入正文）" : "建议调整"}</span><p>{revision.revised}</p></div>
                       </div>
                     </div>
                     <div className="revision-actions">
                       {state ? (
-                        <span className={`decision decision-${state}`}>
-                          {state === "accepted" ? <Check size={16} /> : <X size={16} />}
-                          {state === "accepted" ? "已采纳" : "已跳过"}
-                        </span>
+                        <>
+                          <span className={`decision decision-${state}`}>
+                            {state === "accepted" ? <Check size={16} /> : <X size={16} />}
+                            {state === "accepted" ? "已采纳" : "已跳过"}
+                          </span>
+                          <button className="action-button" type="button" disabled={editorBusy} onClick={() => setRevisionState(revision.id)}>{state === "accepted" ? "取消采纳" : "重新考虑"}</button>
+                        </>
                       ) : (
                         <>
-                          <button className="action-button" type="button" onClick={() => setRevisionState(revision.id, "dismissed")}><X size={16} />跳过</button>
-                          <button className="action-button accept-button" type="button" onClick={() => setRevisionState(revision.id, "accepted")}><Check size={16} />采纳</button>
+                          <button className="action-button" type="button" disabled={editorBusy} onClick={() => setRevisionState(revision.id, "dismissed")}><X size={16} />跳过</button>
+                          {revision.kind !== "reminder" ? <button className="action-button accept-button" type="button" disabled={editorBusy} onClick={() => setRevisionState(revision.id, "accepted")}><Check size={16} />采纳</button> : null}
                         </>
                       )}
                     </div>
@@ -599,7 +722,7 @@ export function JobWorkspace() {
             <div className="regenerate-bar">
               <div><strong>{acceptedRevisions.length} 条建议已采纳</strong><span>重新生成时只应用已采纳内容，原始事实会保留。</span></div>
               {generatingResume ? <div className="inline-work"><PhaseGlyph icon={(["scan", "write", "check"] as const)[generationPhase]} /><span>{["整理采纳内容", "重组简历表达", "准备可编辑预览"][generationPhase]}</span></div> : null}
-              <button className="primary-button regenerate-button" type="button" disabled={!acceptedRevisions.length || generatingResume} onClick={regenerateResume}>
+              <button className="primary-button regenerate-button" type="button" disabled={!acceptedRevisions.length || editorBusy || analyzing || uploading} onClick={regenerateResume}>
                 <span className="button-icon">{generatingResume ? <LoaderCircle className="spin" size={17} /> : <RefreshCw size={17} />}</span>
                 <span>{generatingResume ? "正在重新生成" : "重新生成简历"}</span>
                 <span className="button-icon" />
@@ -608,32 +731,52 @@ export function JobWorkspace() {
           </section>
         ) : null}
 
-        {generatedResume || generatingResume ? (
+        {draft || generatingResume ? (
           <section className="resume-editor-section suggestions-enter" id="resume-editor">
             <div className="suggestions-heading">
               <div><span className="step-label">优化版简历</span><h2>检查、修改并下载</h2></div>
-              <button className="action-button" type="button" disabled={!resumeHistory.length} onClick={undoResumeChange}><Undo2 size={16} />撤销上一步</button>
+              <button className="action-button" type="button" disabled={!resumeHistory.length || editorBusy} onClick={undoResumeChange}><Undo2 size={16} />撤销上一步</button>
             </div>
+            {draft ? <div className="draft-context">
+              <p>当前草稿来源：{draft.resume.filename}</p>
+              <details><summary>查看草稿对应岗位</summary><pre>{draft.jobDescription}</pre></details>
+              {!draftMatchesInput ? <p role="status">这份草稿对应之前的简历或岗位，下载仍使用原草稿的内容和文件名。</p> : null}
+              <label><input type="checkbox" checked={saveDraftLocally} onChange={(event) => setSaveDraftLocally(event.target.checked)} />在此设备自动保存草稿（含简历和岗位文本）</label>
+              <small>默认不保存到本机。关闭后停止更新，已保存的副本可手动清除。</small>
+              <button className="text-button" type="button" onClick={() => { try { localStorage.removeItem(DRAFT_STORAGE_KEY); setSaveDraftLocally(false); setSuccessMessage("已清除本机保存的草稿，编辑区内容仍保留。"); } catch { setError("本机草稿暂时无法清除，请检查浏览器存储设置。"); } }}>清除本机草稿</button>
+            </div> : null}
+            {pendingDraft ? <section className="draft-preview" aria-label="新版本对照">
+              <h3>确认后才会替换当前草稿</h3>
+              <p>新版本来源：{pendingDraft.resume.filename}。手工修改不会自动带入新版本，请先核对。</p>
+              <div className="comparison-grid">
+                <div className="comparison original-copy"><span>当前草稿</span><pre>{generatedResume}</pre></div>
+                <div className="comparison revised-copy"><span>准备替换的新版本</span><pre>{pendingDraft.content}</pre></div>
+              </div>
+              <div className="draft-controls">
+                <button className="action-button" type="button" onClick={() => { setPendingDraft(null); setSuccessMessage("已保留当前草稿。"); }}>保留当前草稿</button>
+                <button className="action-button accept-button" type="button" onClick={() => applyDraft(pendingDraft)}>替换当前草稿</button>
+              </div>
+            </section> : null}
             <div className="editor-grid">
               <label className="resume-document">
                 <span>可直接编辑正文</span>
-                <textarea value={generatedResume} onChange={(event) => setGeneratedResume(event.target.value)} aria-label="优化版简历正文" />
+                <textarea value={generatedResume} disabled={editorBusy} onChange={(event) => setDraft((current) => current ? { ...current, content: event.target.value } : current)} aria-label="优化版简历正文" />
               </label>
               <aside className="ai-refine-panel">
                 <div><MessageSquare size={18} /><strong>继续让 AI 修改</strong></div>
                 <p>点名某一段时只改该段；明确说“整体调整”时才会修改全文。</p>
                 {refiningResume ? <div className="inline-work refine-work"><PhaseGlyph icon={(["scan", "write", "check"] as const)[refinePhase]} /><span>{["读取当前版本", "按要求修改段落", "检查事实一致性"][refinePhase]}</span></div> : null}
                 <form onSubmit={refineGeneratedResume}>
-                  <textarea value={aiInstruction} onChange={(event) => setAiInstruction(event.target.value)} placeholder="例如：把第二段写得更简洁，保留所有数据" aria-label="AI 修改要求" />
-                  <button className="primary-button" type="submit" disabled={!aiInstruction.trim() || refiningResume}>
+                  <textarea value={aiInstruction} disabled={editorBusy} onChange={(event) => setAiInstruction(event.target.value)} placeholder="例如：把第二段写得更简洁，保留所有数据" aria-label="AI 修改要求" />
+                  <button className="primary-button" type="submit" disabled={!generatedResume.trim() || !aiInstruction.trim() || editorBusy || Boolean(pendingDraft)}>
                     <span className="button-icon">{refiningResume ? <LoaderCircle className="spin" size={17} /> : <Sparkles size={17} />}</span>
                     <span>{refiningResume ? "正在修改" : "应用 AI 修改"}</span>
                     <span className="button-icon" />
                   </button>
                 </form>
                 <div className="download-actions">
-                  <button className="action-button" type="button" disabled={Boolean(exporting)} onClick={() => downloadResume("docx")}><Download size={16} />{exporting === "docx" ? "生成中" : "下载 DOCX"}</button>
-                  <button className="action-button accept-button" type="button" disabled={Boolean(exporting)} onClick={() => downloadResume("pdf")}><Download size={16} />{exporting === "pdf" ? "生成中" : "下载 PDF"}</button>
+                  <button className="action-button" type="button" disabled={Boolean(exporting) || editorBusy || !generatedResume.trim()} onClick={() => downloadResume("docx")}><Download size={16} />{exporting === "docx" ? "生成中" : "下载 DOCX"}</button>
+                  <button className="action-button accept-button" type="button" disabled={Boolean(exporting) || editorBusy || !generatedResume.trim()} onClick={() => downloadResume("pdf")}><Download size={16} />{exporting === "pdf" ? "生成中" : "下载 PDF"}</button>
                 </div>
               </aside>
             </div>
