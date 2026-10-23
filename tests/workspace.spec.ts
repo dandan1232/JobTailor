@@ -19,7 +19,7 @@ test("analyzes a resume against a job and accepts a revision", async ({ page }, 
   await page.getByRole("button", { name: "开始匹配分析" }).click();
 
   await expect(page.getByRole("heading", { name: "岗位匹配诊断" })).toBeVisible();
-  await expect(page.getByText("本地分析预览")).toBeVisible();
+  await expect(page.getByText("本地分析预览", { exact: true })).toBeVisible();
   await expect(page.getByRole("heading", { name: "按影响程度逐条处理" })).toBeVisible();
 
   const summaryRevision = page.locator(".revision-item", { hasText: "让开头直接回应目标岗位" });
@@ -143,11 +143,14 @@ test("only saves drafts on opt-in and restores their source after a reload", asy
 test("ignores analysis results for a job description that has changed", async ({ page }) => {
   let release: () => void = () => {};
   const released = new Promise<void>((resolve) => { release = resolve; });
+  let routeCompleted: () => void = () => {};
+  const completed = new Promise<void>((resolve) => { routeCompleted = resolve; });
   await page.route("**/api/analyze", async (route) => {
     await released;
     await route.fulfill({ contentType: "application/x-ndjson", body: `${JSON.stringify({ type: "summary", data: {
       analysis_mode: "local", score: 99, verdict: "旧岗位的诊断", dimensions: [], requirements: [], matched: [], gaps: [],
     } })}\n${JSON.stringify({ type: "done" })}\n` });
+    routeCompleted();
   });
   await page.goto("/");
   await page.getByRole("button", { name: "载入示例" }).click();
@@ -155,9 +158,8 @@ test("ignores analysis results for a job description that has changed", async ({
   await page.getByRole("button", { name: "开始匹配分析" }).click();
   await requested;
   await page.getByLabel("目标岗位 JD").fill("新的岗位描述，需要完全不同的岗位技能与经历，请根据新的要求进行分析。".repeat(2));
-  const responded = page.waitForResponse("**/api/analyze");
   release();
-  await responded;
+  await completed;
   await expect(page.getByRole("button", { name: "开始匹配分析" })).toBeEnabled();
   await expect(page.getByText("分析结果会显示在这里")).toBeVisible();
   await expect(page.getByText("旧岗位的诊断")).toHaveCount(0);
@@ -180,7 +182,10 @@ test("prevents editing and downloading a draft while AI changes are arriving", a
   await expect(page.getByRole("button", { name: "撤销上一步" })).toBeDisabled();
   await expect(page.getByRole("button", { name: "下载 PDF" })).toBeDisabled();
   release();
-  await expect(editor).toBeEnabled();
+  await expect(page.getByRole("button", { name: "替换当前草稿" })).toBeEnabled();
+  await expect(editor).toHaveValue(original);
+  await expect(page.getByRole("region", { name: "AI 修改预览" })).toContainText("更简洁的已有经历表达");
+  await page.getByRole("button", { name: "替换当前草稿" }).click();
   await expect(editor).toHaveValue(`${original}\n更简洁的已有经历表达`);
   await page.getByRole("button", { name: "撤销上一步" }).click();
   await expect(editor).toHaveValue(original);
@@ -204,9 +209,127 @@ test("restores the complete draft if the page reloads during a partial AI respon
   });
   await page.getByLabel("AI 修改要求").fill("精简当前简历");
   await page.getByRole("button", { name: "应用 AI 修改" }).click();
-  await expect(page.getByLabel("优化版简历正文")).toHaveValue("半截 AI 修改内容");
+  await expect(page.getByRole("region", { name: "AI 修改预览" })).toContainText("半截 AI 修改内容");
+  await expect(page.getByLabel("优化版简历正文")).toHaveValue(original);
   await expect.poll(() => page.evaluate(() => JSON.parse(localStorage.getItem("jobtailor:draft:v1") ?? "null")?.draft.content)).toBe(original);
   await page.reload();
   await page.getByRole("button", { name: "恢复本机草稿" }).click();
   await expect(page.getByLabel("优化版简历正文")).toHaveValue(original);
+});
+
+test("explains data use and separates alternatives from preferred requirements", async ({ page }) => {
+  await page.goto("/");
+  await page.getByText("数据如何使用与使用限额", { exact: true }).click();
+  await expect(page.locator(".privacy-details")).toContainText("简历和岗位文本不会发送给模型服务");
+  await expect(page.locator(".privacy-details")).toContainText("每个浏览器每 10 分钟最多 6 次 AI 请求");
+  await page.getByRole("button", { name: "载入示例" }).click();
+  await page.getByRole("button", { name: "开始匹配分析" }).click();
+  const alternatives = page.locator(".requirement", { hasText: "FastAPI 或 Django" });
+  await expect(alternatives).toHaveClass(/pass/);
+  await expect(page.locator(".requirement", { hasText: "AWS" })).toContainText("加分");
+  await expect(page.locator(".revision-item", { hasText: "技能缺口" })).not.toContainText("Django");
+  await expect(page.locator(".revision-item", { hasText: "技能缺口" })).not.toContainText("AWS");
+});
+
+test("shows no numeric match score when the local rules cannot recognize the job", async ({ page }) => {
+  await page.goto("/");
+  await page.getByRole("button", { name: "载入示例" }).click();
+  await page.getByLabel("目标岗位 JD").fill("市场运营专员，负责品牌活动策划、用户调研、内容制作与社群维护，并跟进活动执行和复盘。");
+  await page.getByRole("button", { name: "开始匹配分析" }).click();
+  await expect(page.locator(".score-ring")).toContainText("暂不评分");
+  await expect(page.locator(".scope-note")).toContainText("不表示简历不匹配");
+});
+
+test("highlights new facts in an AI preview and lets users keep their original", async ({ page }, testInfo) => {
+  await page.setViewportSize({ width: 390, height: 844 });
+  await generateSampleDraft(page);
+  const editor = page.getByLabel("优化版简历正文");
+  const original = await editor.inputValue();
+  await page.route("**/api/resume/refine", (route) => route.fulfill({ contentType: "text/plain", body: `${original}\n负责 Kubernetes 项目，性能提升 99%` }));
+  await page.getByLabel("AI 修改要求").fill("更简洁地表达项目贡献");
+  await page.getByRole("button", { name: "应用 AI 修改" }).click();
+  const preview = page.getByRole("region", { name: "AI 修改预览" });
+  await expect(preview).toContainText("新增数字，请核对：99%");
+  await expect(preview).toContainText("新增技术或英文术语，请核对：Kubernetes");
+  await expect(preview.locator("mark")).toContainText(["负责 Kubernetes 项目，性能提升 99%"]);
+  await expect(editor).toHaveValue(original);
+  await page.screenshot({ path: testInfo.outputPath("mobile-ai-review.png"), fullPage: true });
+  await page.getByRole("button", { name: "保留当前草稿" }).click();
+  await expect(editor).toHaveValue(original);
+  await expect(preview).toHaveCount(0);
+});
+
+test("rejects malformed and incomplete analysis without crashing or enabling generation", async ({ page }) => {
+  await page.route("**/api/analyze", (route) => route.fulfill({ contentType: "application/x-ndjson", body: '{"type":"summary","data":{"score":88}}\n{"type":"done"}\n' }));
+  await page.goto("/");
+  await page.getByRole("button", { name: "载入示例" }).click();
+  await page.getByRole("button", { name: "开始匹配分析" }).click();
+  await expect(page.locator(".error-message")).toContainText("格式不完整或有误");
+  await expect(page.getByRole("button", { name: "开始匹配分析" })).toBeEnabled();
+  await expect(page.getByLabel("目标岗位 JD")).toBeVisible();
+  await expect(page.getByRole("button", { name: "重新生成简历" })).toHaveCount(0);
+});
+
+test("keeps failed AI previews unapplied and displays retry time on a rate limit", async ({ page }) => {
+  await generateSampleDraft(page);
+  const editor = page.getByLabel("优化版简历正文");
+  const original = await editor.inputValue();
+  await page.route("**/api/resume/refine", (route) => route.fulfill({ status: 429, json: { detail: "操作过于频繁，请约 10 分钟后再试。", retry_after_seconds: 600 }, headers: { "Retry-After": "600" } }));
+  await page.getByLabel("AI 修改要求").fill("精简项目");
+  await page.getByRole("button", { name: "应用 AI 修改" }).click();
+  await expect(page.locator(".error-message")).toContainText("10 分钟");
+  await expect(editor).toHaveValue(original);
+  await expect(page.getByRole("button", { name: "替换当前草稿" })).toHaveCount(0);
+  await expect(page.getByRole("button", { name: "下载 PDF" })).toBeEnabled();
+});
+
+test("keeps partial analysis visible but prevents generation before a verified completion", async ({ page }) => {
+  const summary = { type: "summary", data: {
+    analysis_mode: "ai", score: 70, verdict: "部分诊断已返回。",
+    dimensions: ["关键词覆盖", "经历证据", "岗位相关性", "表达清晰度"].map((name) => ({ name, score: 70, note: "核对原文依据。" })),
+    requirements: [], matched: [], gaps: [],
+  } };
+  const revision = { type: "revision", data: { id: "partial", priority: "中", category: "摘要", title: "明确岗位方向", original: "陈默", revised: "陈默", reason: "表达更直接。" } };
+  await page.route("**/api/analyze", (route) => route.fulfill({ contentType: "application/x-ndjson", body: `${JSON.stringify(summary)}\n${JSON.stringify(revision)}\n` }));
+  await page.goto("/");
+  await page.getByRole("button", { name: "载入示例" }).click();
+  await page.getByRole("button", { name: "开始匹配分析" }).click();
+  await expect(page.getByRole("status")).toContainText("分析未完成");
+  await page.locator(".revision-item").getByRole("button", { name: "采纳", exact: true }).click();
+  await expect(page.getByRole("button", { name: "重新生成简历" })).toBeDisabled();
+});
+
+test("an empty code block from AI cannot replace a nonempty draft", async ({ page }) => {
+  await generateSampleDraft(page);
+  const editor = page.getByLabel("优化版简历正文");
+  const original = await editor.inputValue();
+  await page.route("**/api/resume/refine", (route) => route.fulfill({ contentType: "text/plain", body: "```text\n```" }));
+  await page.getByLabel("AI 修改要求").fill("精简项目");
+  await page.getByRole("button", { name: "应用 AI 修改" }).click();
+  await expect(page.locator(".error-message")).toContainText("没有可用正文");
+  await expect(page.getByRole("button", { name: "替换当前草稿" })).toBeDisabled();
+  await expect(editor).toHaveValue(original);
+  await page.getByRole("button", { name: "保留当前草稿" }).click();
+  await expect(editor).toBeEnabled();
+});
+
+test("cancels AI editing while preserving the original and allowing retry", async ({ page }) => {
+  await generateSampleDraft(page);
+  const editor = page.getByLabel("优化版简历正文");
+  const original = await editor.inputValue();
+  let release: () => void = () => {};
+  const pending = new Promise<void>((resolve) => { release = resolve; });
+  await page.route("**/api/resume/refine", async (route) => {
+    await pending;
+    await route.fulfill({ contentType: "text/plain", body: "不应应用的过期修改" });
+  });
+  await page.getByLabel("AI 修改要求").fill("精简项目");
+  const requested = page.waitForRequest("**/api/resume/refine");
+  await page.getByRole("button", { name: "应用 AI 修改" }).click();
+  await requested;
+  await page.getByRole("button", { name: "取消 AI 修改" }).click();
+  await expect(page.locator(".error-message")).toContainText("已取消");
+  await expect(editor).toHaveValue(original);
+  await expect(page.getByRole("button", { name: "应用 AI 修改" })).toBeEnabled();
+  release();
 });

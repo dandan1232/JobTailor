@@ -18,13 +18,21 @@ const source = readFileSync(join(root, "app/api/resume/export/route.ts"), "utf8"
 const compiled = ts.transpileModule(source, {
   compilerOptions: { module: ts.ModuleKind.CommonJS, target: ts.ScriptTarget.ES2022, esModuleInterop: true },
 }).outputText;
+const protection = {};
+vm.runInNewContext(ts.transpileModule(readFileSync(join(root, "lib/api-protection.ts"), "utf8"), {
+  compilerOptions: { module: ts.ModuleKind.CommonJS, target: ts.ScriptTarget.ES2022 },
+}).outputText, { exports: protection, require, Buffer });
 
 function loadRoute(readFont = readFile, platform = process.platform) {
   const exports = {};
   vm.runInNewContext(compiled, {
     exports, Buffer, Response, Uint8Array,
     process: { cwd: () => root, platform },
-    require: (name) => name === "node:fs/promises" ? { readFile: readFont } : require(name),
+    require: (name) => {
+      if (name === "node:fs/promises") return { readFile: readFont };
+      if (name === "@/lib/api-protection") return { ...protection, withApiProtection: (request, _operation, handler) => handler(request) };
+      return require(name);
+    },
   });
   return exports.POST;
 }

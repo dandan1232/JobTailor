@@ -1,17 +1,20 @@
 import { aiIsConfigured, analyzeResume, requestAiAnalysisStream } from "@/lib/analysis";
 import { AnalysisSseDecoder } from "@/lib/analysis-stream";
+import { readJsonObject, validText, withApiProtection } from "@/lib/api-protection";
 
 export const runtime = "nodejs";
 
 export async function POST(request: Request) {
+  const useAi = aiIsConfigured();
+  return withApiProtection(request, useAi ? "analyze" : "localAnalyze", async (request) => {
+    const body = await readJsonObject(request);
+    if (!validText(body.resume_text, 30_000) || body.resume_text.trim().length < 40) return Response.json({ detail: "简历文本长度必须在 40 到 30000 个字符之间" }, { status: 422 });
+    if (!validText(body.job_description, 20_000) || body.job_description.trim().length < 30) return Response.json({ detail: "职位描述长度必须在 30 到 20000 个字符之间" }, { status: 422 });
   try {
-    const body = await request.json() as { resume_text?: string; job_description?: string };
-    const resumeText = body.resume_text?.trim() ?? "";
-    const jobDescription = body.job_description?.trim() ?? "";
-    if (resumeText.length < 40 || resumeText.length > 30_000) return Response.json({ detail: "简历文本长度必须在 40 到 30000 个字符之间" }, { status: 422 });
-    if (jobDescription.length < 30 || jobDescription.length > 20_000) return Response.json({ detail: "职位描述长度必须在 30 到 20000 个字符之间" }, { status: 422 });
+    const resumeText = body.resume_text.trim();
+    const jobDescription = body.job_description.trim();
 
-    if (!aiIsConfigured()) {
+    if (!useAi) {
       const local = analyzeResume(resumeText, jobDescription);
       const events = [
         JSON.stringify({ type: "summary", data: { ...local, revisions: [] } }),
@@ -21,19 +24,24 @@ export async function POST(request: Request) {
       return new Response(`${events.join("\n")}\n`, { headers: { "Content-Type": "application/x-ndjson; charset=utf-8" } });
     }
 
-    const upstream = await requestAiAnalysisStream(resumeText, jobDescription);
+    const modelController = new AbortController();
+    const upstream = await requestAiAnalysisStream(resumeText, jobDescription, AbortSignal.any([request.signal, modelController.signal]));
     if (!upstream?.body) throw new Error("模型没有返回可读取的数据流。");
     const decoder = new TextDecoder();
     const encoder = new TextEncoder();
     const sseDecoder = new AnalysisSseDecoder();
+    const reader = upstream.body.getReader();
+    let cancelled = false;
+    let receivedBytes = 0;
 
     const stream = new ReadableStream({
       async start(controller) {
-        const reader = upstream.body!.getReader();
         try {
           while (true) {
             const { done, value } = await reader.read();
             if (done) break;
+            receivedBytes += value.byteLength;
+            if (receivedBytes > 512 * 1024) throw new Error("模型返回内容过长，请缩短输入后重试。");
             const text = decoder.decode(value, { stream: true });
             for (const row of sseDecoder.push(text)) controller.enqueue(encoder.encode(`${row}\n`));
           }
@@ -41,11 +49,18 @@ export async function POST(request: Request) {
           for (const row of [...sseDecoder.push(tail), ...sseDecoder.finish()]) controller.enqueue(encoder.encode(`${row}\n`));
           controller.enqueue(encoder.encode(`${JSON.stringify({ type: "done" })}\n`));
         } catch (error) {
-          controller.enqueue(encoder.encode(`${JSON.stringify({ type: "error", detail: error instanceof Error ? error.message : "流式分析失败" })}\n`));
+          modelController.abort(error);
+          await reader.cancel(error).catch(() => {});
+          if (!cancelled) controller.enqueue(encoder.encode(`${JSON.stringify({ type: "error", detail: error instanceof Error ? error.message : "流式分析失败" })}\n`));
         } finally {
-          controller.close();
+          if (!cancelled) controller.close();
           reader.releaseLock();
         }
+      },
+      async cancel(reason) {
+        cancelled = true;
+        modelController.abort(reason);
+        await reader.cancel(reason);
       },
     });
     return new Response(stream, {
@@ -58,4 +73,5 @@ export async function POST(request: Request) {
   } catch (error) {
     return Response.json({ detail: error instanceof Error ? error.message : "分析服务暂时不可用" }, { status: 502 });
   }
+  });
 }

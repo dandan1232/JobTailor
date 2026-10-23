@@ -1,7 +1,9 @@
 import { aiIsConfigured, Revision } from "@/lib/analysis";
 
-async function streamModel(prompt: string): Promise<Response> {
+async function streamModel(prompt: string, signal?: AbortSignal): Promise<Response> {
   if (!aiIsConfigured()) throw new Error("AI 服务尚未配置");
+  const controller = new AbortController();
+  const upstreamSignal = AbortSignal.any([controller.signal, AbortSignal.timeout(180_000), ...(signal ? [signal] : [])]);
   const upstream = await fetch(`${process.env.AI_BASE_URL!.replace(/\/$/, "")}/chat/completions`, {
     method: "POST",
     headers: { Authorization: `Bearer ${process.env.AI_API_KEY}`, "Content-Type": "application/json" },
@@ -13,50 +15,80 @@ async function streamModel(prompt: string): Promise<Response> {
       ],
       temperature: 0.2,
       stream: true,
+      max_tokens: 12_000,
     }),
-    signal: AbortSignal.timeout(5 * 60_000),
+    signal: upstreamSignal,
   });
-  if (!upstream.ok) throw new Error(`简历生成失败（HTTP ${upstream.status}）`);
+  if (!upstream.ok) {
+    await upstream.body?.cancel();
+    controller.abort();
+    throw new Error(`简历生成失败（HTTP ${upstream.status}）`);
+  }
   if (!upstream.body) throw new Error("模型没有返回可读取的数据流");
 
   const decoder = new TextDecoder();
   const encoder = new TextEncoder();
   let buffer = "";
+  let completed = false;
+  let outputLength = 0;
+  let receivedBytes = 0;
   const emitLine = (line: string, controller: ReadableStreamDefaultController<Uint8Array>) => {
     const trimmed = line.trim();
     if (!trimmed) return;
-    const data = trimmed.startsWith("data:") ? trimmed.slice(5).trim() : trimmed;
-    if (!data || data === "[DONE]") return;
-    try {
-      const chunk = JSON.parse(data) as { choices?: Array<{ delta?: { content?: string }; message?: { content?: string } }> };
-      const content = chunk.choices?.[0]?.delta?.content ?? chunk.choices?.[0]?.message?.content;
-      if (content) {
-        controller.enqueue(encoder.encode(content));
-      }
-    } catch {
-      // Ignore keep-alive/non-JSON lines; a partial JSON chunk is handled by the provider's next line.
+    if (!trimmed.startsWith("data:")) return;
+    const data = trimmed.slice(5).trim();
+    if (!data) return;
+    if (data === "[DONE]") { completed = true; return; }
+    let chunk: { error?: unknown; choices?: Array<{ delta?: { content?: unknown }; message?: { content?: unknown }; finish_reason?: string | null }> };
+    try { chunk = JSON.parse(data); }
+    catch { throw new Error("AI 修改数据格式有误，原稿未受影响，请重试。"); }
+    if (chunk.error || !Array.isArray(chunk.choices)) throw new Error("模型服务返回异常，修改未完成，请重试。");
+    const choice = chunk.choices[0];
+    const content = choice?.delta?.content ?? choice?.message?.content;
+    if (content !== undefined && content !== null && typeof content !== "string") throw new Error("AI 修改内容格式有误，请重试。");
+    if (content) {
+      if (completed) throw new Error("AI 修改结束后仍返回内容，请重试。");
+      outputLength += content.length;
+      if (outputLength > 60_000) throw new Error("AI 修改结果超过 60000 字，请缩短简历后重试。");
+      controller.enqueue(encoder.encode(content));
+    }
+    if (choice?.finish_reason === "length") throw new Error("AI 修改因输出长度限制而中断，请缩短简历后重试。");
+    if (choice?.finish_reason === "content_filter") throw new Error("模型服务中止了修改，请调整要求后重试。");
+    if (choice?.finish_reason) {
+      if (choice.finish_reason !== "stop") throw new Error("AI 修改未正常完成，请重试。");
+      completed = true;
     }
   };
+  const reader = upstream.body.getReader();
   const stream = new ReadableStream({
-    async start(controller) {
-      const reader = upstream.body!.getReader();
+    async start(output) {
       try {
         while (true) {
           const { done, value } = await reader.read();
           if (done) break;
+          receivedBytes += value.byteLength;
+          if (receivedBytes > 512 * 1024) throw new Error("模型返回的数据过长，请重试。");
           buffer += decoder.decode(value, { stream: true });
+          if (buffer.length > 256_000) throw new Error("模型返回的数据过长，请重试。");
           const lines = buffer.split(/\r?\n/);
           buffer = lines.pop() ?? "";
-          for (const line of lines) emitLine(line, controller);
+          for (const line of lines) emitLine(line, output);
         }
         buffer += decoder.decode();
-        if (buffer) emitLine(buffer, controller);
-        controller.close();
+        if (buffer) emitLine(buffer, output);
+        if (!completed || !outputLength) throw new Error("AI 修改连接提前结束，预览不完整，请重试。");
+        output.close();
       } catch (error) {
-        controller.error(error);
+        controller.abort(error);
+        await reader.cancel(error).catch(() => {});
+        output.error(error);
       } finally {
         reader.releaseLock();
       }
+    },
+    async cancel(reason) {
+      controller.abort(reason);
+      await reader.cancel(reason);
     },
   });
   return new Response(stream, { headers: { "Content-Type": "text/plain; charset=utf-8", "Cache-Control": "no-cache, no-transform", "X-Accel-Buffering": "no" } });
@@ -98,11 +130,12 @@ export function applyAcceptedRevisions(original: string, revisions: Revision[]):
 
 export function generateResumeStream(original: string, revisions: Revision[]): Promise<Response> | Response {
   const revisedDraft = applyAcceptedRevisions(original, revisions);
+  if (revisedDraft.length > 60_000) throw new Error("生成后的简历超过 60000 字，请减少采纳内容后重试。");
   // Suggestions already contain AI-written copy approved by the user.
   // A second full rewrite could undo those decisions.
   return new Response(revisedDraft, { headers: { "Content-Type": "text/plain; charset=utf-8", "Cache-Control": "no-store" } });
 }
 
-export function refineResumeStream(content: string, instruction: string): Promise<Response> {
-  return streamModel(`按照用户要求修改简历。只改用户明确点名的部分；只有用户明确要求整体调整时才改全文。禁止新增事实。\n\n<当前简历>\n${content}\n</当前简历>\n\n<用户要求>\n${instruction}\n</用户要求>`);
+export function refineResumeStream(content: string, instruction: string, signal?: AbortSignal): Promise<Response> {
+  return streamModel(`按照用户要求修改简历。只改用户明确点名的部分；只有用户明确要求整体调整时才改全文。禁止新增事实。\n\n<当前简历>\n${content}\n</当前简历>\n\n<用户要求>\n${instruction}\n</用户要求>`, signal);
 }

@@ -92,6 +92,10 @@ test('reminders cannot be applied even when their source text exists', () => {
   }]), /待补充提醒/);
 });
 
+test('generation refuses combined output that could not be edited or exported', () => {
+  assert.throws(() => generateResumeStream('第一段\n第二段', [revision('第一段', '字'.repeat(40_000)), revision('第二段', '字'.repeat(30_000))]), /60000/);
+});
+
 test('repeated opening text never produces an ambiguous replacement', () => {
   for (const resume of ['张三\n使用 Python 开发接口\n张三', '张 三\n使用 Python 开发接口\n张三']) {
     const analysis = analyzeResume(resume, '后端工程师\n熟悉 Python，负责业务服务开发与维护');

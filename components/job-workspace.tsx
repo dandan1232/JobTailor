@@ -24,9 +24,11 @@ import {
   X,
 } from "lucide-react";
 import { ChangeEvent, DragEvent, FormEvent, useEffect, useRef, useState } from "react";
+import { parseAnalysisEvent } from "@/lib/analysis-validation";
+import { reviewResumeChanges } from "@/lib/resume-review";
 
-type Dimension = { name: string; score: number; note: string };
-type Requirement = { label: string; status: "pass" | "missing"; evidence: string };
+type Dimension = { name: string; score: number | null; note: string };
+type Requirement = { label: string; status: "pass" | "missing"; evidence: string; importance?: "required" | "preferred" };
 type Evidence = { skill: string; evidence: string };
 type Gap = { skill: string; suggestion: string };
 type Revision = {
@@ -41,7 +43,8 @@ type Revision = {
 };
 type AnalyzeResult = {
   analysis_mode: "ai" | "local";
-  score: number;
+  score: number | null;
+  scope_note?: string;
   verdict: string;
   dimensions: Dimension[];
   requirements: Requirement[];
@@ -51,6 +54,8 @@ type AnalyzeResult = {
 };
 type ResumeFile = { filename: string; characters: number; text: string };
 type ResumeDraft = { content: string; resume: ResumeFile; jobDescription: string };
+type PendingDraft = ResumeDraft & { operation?: "refine"; complete?: boolean };
+type ServiceInfo = { analysis_mode: "ai" | "local"; usage_limits?: { perClientRequests: number; clientWindowSeconds: number; perClientConcurrent: number; globalRequests: number; globalWindowSeconds: number; globalConcurrent: number } };
 type WorkPhase = { label: string; detail: string; icon: "scan" | "spark" | "write" | "check" };
 
 const API_URL = "";
@@ -119,12 +124,34 @@ async function fetchWithTimeout(input: RequestInfo | URL, init: RequestInit, tim
   const controller = new AbortController();
   const timer = window.setTimeout(() => controller.abort(), timeoutMs);
   try {
-    return await fetch(input, { ...init, signal: controller.signal });
+    const signal = init.signal ? AbortSignal.any([init.signal, controller.signal]) : controller.signal;
+    const response = await fetch(input, { ...init, signal });
+    if (!response.body) {
+      window.clearTimeout(timer);
+      return response;
+    }
+    const reader = response.body.getReader();
+    return new Response(new ReadableStream({
+      async pull(stream) {
+        try {
+          const { done, value } = await reader.read();
+          if (done) { window.clearTimeout(timer); stream.close(); }
+          else stream.enqueue(value);
+        } catch (error) {
+          window.clearTimeout(timer);
+          stream.error(controller.signal.aborted ? new Error("请求等待时间过长，请稍后重试。") : error);
+        }
+      },
+      async cancel(reason) {
+        window.clearTimeout(timer);
+        controller.abort();
+        await reader.cancel(reason);
+      },
+    }), { status: response.status, statusText: response.statusText, headers: response.headers });
   } catch (error) {
+    window.clearTimeout(timer);
     if (error instanceof DOMException && error.name === "AbortError") throw new Error("请求等待时间过长，模型服务可能暂时繁忙。请稍后重试。");
     throw error;
-  } finally {
-    window.clearTimeout(timer);
   }
 }
 
@@ -159,6 +186,8 @@ export function JobWorkspace() {
   const fileInputRef = useRef<HTMLInputElement>(null);
   const suggestionsRef = useRef<HTMLElement>(null);
   const analysisVersionRef = useRef(0);
+  const analysisAbortRef = useRef<AbortController | null>(null);
+  const refineAbortRef = useRef<AbortController | null>(null);
   const uploadVersionRef = useRef(0);
   const refineBaseRef = useRef<ResumeDraft | null>(null);
   const [mobileNavOpen, setMobileNavOpen] = useState(false);
@@ -167,12 +196,14 @@ export function JobWorkspace() {
   const [result, setResult] = useState<AnalyzeResult | null>(null);
   const [uploading, setUploading] = useState(false);
   const [analyzing, setAnalyzing] = useState(false);
+  const [analysisComplete, setAnalysisComplete] = useState(false);
+  const [serviceInfo, setServiceInfo] = useState<ServiceInfo | null>(null);
   const [dragActive, setDragActive] = useState(false);
   const [error, setError] = useState("");
   const [successMessage, setSuccessMessage] = useState("");
   const [revisionStates, setRevisionStates] = useState<Record<string, "accepted" | "dismissed">>({});
   const [draft, setDraft] = useState<ResumeDraft | null>(null);
-  const [pendingDraft, setPendingDraft] = useState<ResumeDraft | null>(null);
+  const [pendingDraft, setPendingDraft] = useState<PendingDraft | null>(null);
   const [resumeHistory, setResumeHistory] = useState<ResumeDraft[]>([]);
   const [saveDraftLocally, setSaveDraftLocally] = useState(false);
   const [aiInstruction, setAiInstruction] = useState("");
@@ -187,6 +218,19 @@ export function JobWorkspace() {
   const editorBusy = generatingResume || refiningResume;
   const draftMatchesInput = Boolean(draft && resume && draft.resume.text === resume.text && draft.resume.filename === resume.filename && draft.jobDescription === jobDescription);
   const acceptedRevisions = result?.revisions.filter((revision) => revision.kind !== "reminder" && revisionStates[revision.id] === "accepted") ?? [];
+  const pendingReview = pendingDraft ? reviewResumeChanges(generatedResume, pendingDraft.content) : null;
+
+  useEffect(() => {
+    const controller = new AbortController();
+    fetch("/api/health", { signal: controller.signal }).then((response) => response.json()).then((info) => {
+      if (!controller.signal.aborted && (info.analysis_mode === "ai" || info.analysis_mode === "local")) setServiceInfo(info);
+    }).catch(() => { /* The workflow remains available when service information cannot be loaded. */ });
+    return () => {
+      controller.abort();
+      analysisAbortRef.current?.abort();
+      refineAbortRef.current?.abort();
+    };
+  }, []);
 
   useEffect(() => {
     if (!saveDraftLocally || !draft) return;
@@ -218,6 +262,8 @@ export function JobWorkspace() {
 
   function invalidateAnalysis() {
     analysisVersionRef.current++;
+    analysisAbortRef.current?.abort();
+    setAnalysisComplete(false);
     setResult(null);
     setRevisionStates({});
     setAnalyzing(false);
@@ -226,8 +272,12 @@ export function JobWorkspace() {
   }
 
   function applyDraft(next: ResumeDraft) {
+    if (!next.content.trim()) {
+      setError("新版本没有可用正文，原稿保持不变。");
+      return;
+    }
     if (draft) setResumeHistory((history) => [...history, draft]);
-    setDraft(next);
+    setDraft({ content: next.content, resume: next.resume, jobDescription: next.jobDescription });
     setPendingDraft(null);
     setAiInstruction("");
     setSuccessMessage("优化版简历已生成，可以直接编辑或下载。");
@@ -340,10 +390,14 @@ export function JobWorkspace() {
     event.preventDefault();
     if (!resume || editorBusy) return;
     const analysisVersion = ++analysisVersionRef.current;
+    const controller = new AbortController();
+    analysisAbortRef.current?.abort();
+    analysisAbortRef.current = controller;
 
     setError("");
     setAnalysisPhase(0);
     setAnalyzing(true);
+    setAnalysisComplete(false);
     setResult(null);
     setRevisionStates({});
     try {
@@ -351,6 +405,7 @@ export function JobWorkspace() {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ resume_text: resume.text, job_description: jobDescription }),
+        signal: controller.signal,
       }, 180_000);
       if (analysisVersion !== analysisVersionRef.current) {
         await response.body?.cancel();
@@ -365,6 +420,29 @@ export function JobWorkspace() {
       const reader = response.body.getReader();
       const decoder = new TextDecoder();
       let buffer = "";
+      let receivedSummary = false;
+      let receivedDone = false;
+      const revisionIds = new Set<string>();
+      const consumeLine = (line: string) => {
+        if (!line.trim()) return;
+        const streamEvent = parseAnalysisEvent(JSON.parse(line));
+        if (receivedDone) throw new Error("分析完成后收到多余数据，请重试。");
+        if (streamEvent.type === "summary") {
+          if (receivedSummary) throw new Error("分析重复返回诊断摘要，请重试。");
+          receivedSummary = true;
+          setAnalysisPhase(3);
+          setResult({ ...streamEvent.data, revisions: [] });
+        } else if (streamEvent.type === "revision") {
+          if (!receivedSummary || revisionIds.has(streamEvent.data.id)) throw new Error("修改建议顺序异常或重复，请重试。");
+          revisionIds.add(streamEvent.data.id);
+          setResult((current) => current ? { ...current, revisions: [...current.revisions, streamEvent.data] } : current);
+        } else if (streamEvent.type === "error") {
+          throw new Error(streamEvent.detail);
+        } else {
+          if (!receivedSummary) throw new Error("分析没有返回完整诊断，请重试。");
+          receivedDone = true;
+        }
+      };
       while (true) {
         const { done, value } = await reader.read();
         if (analysisVersion !== analysisVersionRef.current) {
@@ -374,21 +452,12 @@ export function JobWorkspace() {
         buffer += decoder.decode(value ?? new Uint8Array(), { stream: !done });
         const lines = buffer.split("\n");
         buffer = lines.pop() ?? "";
-        for (const line of lines) {
-          if (!line.trim()) continue;
-          const streamEvent = JSON.parse(line) as { type: "summary" | "revision" | "done" | "error"; data?: AnalyzeResult | Revision; detail?: string };
-          if (streamEvent.type === "summary") {
-            setAnalysisPhase(3);
-            const summary = streamEvent.data as AnalyzeResult;
-            setResult({ ...summary, analysis_mode: summary.analysis_mode ?? "ai", revisions: [] });
-          } else if (streamEvent.type === "revision") {
-            setResult((current) => current ? { ...current, revisions: [...current.revisions, streamEvent.data as Revision] } : current);
-          } else if (streamEvent.type === "error") {
-            throw new Error(streamEvent.detail ?? "流式分析失败");
-          }
-        }
+        for (const line of lines) consumeLine(line);
         if (done) break;
       }
+      if (buffer.trim()) consumeLine(buffer);
+      if (!receivedSummary || !receivedDone) throw new Error("分析结果未完整返回，请重新分析；当前草稿未受影响。");
+      setAnalysisComplete(true);
     } catch (analysisError) {
       if (analysisVersion === analysisVersionRef.current) setError(errorMessage(analysisError, "无法连接分析服务，请确认后端已经启动。"));
     } finally {
@@ -408,7 +477,7 @@ export function JobWorkspace() {
   }
 
   async function regenerateResume() {
-    if (!resume || !acceptedRevisions.length || editorBusy) return;
+    if (!resume || !acceptedRevisions.length || editorBusy || !analysisComplete) return;
     setGenerationPhase(0);
     setGeneratingResume(true);
     setError("");
@@ -425,7 +494,9 @@ export function JobWorkspace() {
       }
       const content = await readTextStream(response, () => {});
       if (!content) throw new Error("模型没有返回简历内容");
-      const nextDraft = { content: content.replace(/^```(?:text|markdown)?\s*|\s*```$/g, ""), resume, jobDescription };
+      const cleaned = content.replace(/^```(?:text|markdown)?\s*|\s*```$/g, "").trim();
+      if (!cleaned) throw new Error("生成结果没有可用正文，请重试。");
+      const nextDraft = { content: cleaned, resume, jobDescription };
       if (draft) {
         setPendingDraft(nextDraft);
         setSuccessMessage("新版本已准备好，请对照后决定是否替换当前草稿。");
@@ -444,6 +515,9 @@ export function JobWorkspace() {
     event.preventDefault();
     if (!draft || !generatedResume || !aiInstruction.trim() || editorBusy || pendingDraft) return;
     refineBaseRef.current = draft;
+    const controller = new AbortController();
+    refineAbortRef.current = controller;
+    setPendingDraft(null);
     setRefinePhase(0);
     setRefiningResume(true);
     setError("");
@@ -453,20 +527,19 @@ export function JobWorkspace() {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ content: generatedResume, instruction: aiInstruction }),
+        signal: controller.signal,
       }, 180_000);
       if (!response.ok) {
         const body = await response.json();
         throw new Error(body.detail ?? "AI 修改失败");
       }
-      const previous = draft;
-      setResumeHistory((history) => [...history, previous]);
-      const content = await readTextStream(response, (text) => setDraft({ ...previous, content: text }));
-      if (!content) throw new Error("模型没有返回修改内容");
-      setDraft({ ...previous, content: content.replace(/^```(?:text|markdown)?\s*|\s*```$/g, "") });
-      setAiInstruction("");
-      setSuccessMessage("AI 修改已完成，右侧编辑区已更新。你可以继续修改或撤销。");
+      const content = await readTextStream(response, (text) => setPendingDraft({ ...draft, content: text, operation: "refine", complete: false }));
+      const cleaned = content.replace(/^```(?:text|markdown)?\s*|\s*```$/g, "").trim();
+      if (!cleaned) throw new Error("AI 修改结果没有可用正文，请重试。");
+      setPendingDraft({ ...draft, content: cleaned, operation: "refine", complete: true });
+      setSuccessMessage("AI 修改预览已准备好，请核对改动后再替换当前草稿。");
     } catch (refineError) {
-      setError(`${errorMessage(refineError, "AI 修改失败")} 已返回的部分会保留，可撤销后重试。`);
+      setError(`${controller.signal.aborted ? "本次 AI 修改已取消。" : errorMessage(refineError, "AI 修改未完成")} 原稿保持不变，未完成的预览不能应用。`);
     } finally {
       refineBaseRef.current = null;
       setRefiningResume(false);
@@ -605,10 +678,19 @@ export function JobWorkspace() {
                 disabled={editorBusy}
                 rows={11}
                 minLength={30}
+                maxLength={20_000}
                 placeholder="粘贴完整职位描述，包括职责、技能和经验要求"
                 required
               />
             </label>
+
+            <details className="privacy-details">
+              <summary>数据如何使用与使用限额</summary>
+              <p>{serviceInfo?.analysis_mode === "local" ? "当前为本地分析预览，简历和岗位文本不会发送给模型服务。" : serviceInfo?.analysis_mode === "ai" ? "当前已启用 AI 分析。开始分析后，简历提取文字和目标岗位描述会发送给站点配置的模型服务。" : "启用 AI 时，开始分析会将简历提取文字和目标岗位描述发送给站点配置的模型服务；本地预览不会发送。"}</p>
+              <p>继续让 AI 修改时，会发送当前草稿和本次修改要求。原文件仅用于服务器内存解析；下载导出不调用模型。请在操作前移除不希望发送的个人信息。</p>
+              <p>本机草稿默认关闭，勾选保存后仅保存在当前浏览器，可随时清除。</p>
+              {serviceInfo?.usage_limits ? <p>每个浏览器每 {serviceInfo.usage_limits.clientWindowSeconds / 60} 分钟最多 {serviceInfo.usage_limits.perClientRequests} 次 AI 请求，同时最多 {serviceInfo.usage_limits.perClientConcurrent} 次。站点每小时最多 {serviceInfo.usage_limits.globalRequests} 次，同时最多 {serviceInfo.usage_limits.globalConcurrent} 次；达到限额时会提示稍后重试。</p> : <p>服务设有请求频率、长度和同时处理数量限制，达到限额时会提示重试时间。</p>}
+            </details>
 
             {error ? <p className="error-message"><AlertTriangle size={16} />{error}</p> : null}
             {successMessage ? <p className="success-message"><CheckCircle2 size={16} />{successMessage}</p> : null}
@@ -618,6 +700,7 @@ export function JobWorkspace() {
               <span>{analyzing ? "正在分析简历与岗位" : "开始匹配分析"}</span>
               <span className="button-icon">{analyzing ? null : <ArrowRight size={18} />}</span>
             </button>
+            {analyzing ? <button className="text-button" type="button" onClick={() => { invalidateAnalysis(); setSuccessMessage("分析已取消。"); }}>取消分析</button> : null}
           </section>
 
           <section className="analysis-panel" id="analysis" aria-live="polite">
@@ -633,29 +716,31 @@ export function JobWorkspace() {
               <>
                 <div className="result-header">
                   <div><span className="step-label">{result.analysis_mode === "ai" ? "AI 分析" : "本地分析预览"}</span><h2>岗位匹配诊断</h2></div>
-                  <div className="score-ring" style={{ "--score": `${result.score * 3.6}deg` } as React.CSSProperties}>
-                    <strong>{result.score}</strong><span>匹配度</span>
+                  <div className="score-ring" style={{ "--score": `${(result.score ?? 0) * 3.6}deg` } as React.CSSProperties}>
+                    <strong>{result.score ?? "—"}</strong><span>{result.score === null ? "暂不评分" : "匹配度"}</span>
                   </div>
                 </div>
                 <p className="verdict">{result.verdict}</p>
+                {result.scope_note ? <p className="scope-note">{result.scope_note}</p> : null}
+                {!analyzing && !analysisComplete ? <p className="error-message" role="status">分析未完成，已有内容仅供查看，请重试后再生成。</p> : null}
 
                 <div className="dimension-list">
                   {result.dimensions.map((dimension) => (
                     <div className="dimension" key={dimension.name}>
-                      <div><strong>{dimension.name}</strong><span>{dimension.score}</span></div>
-                      <div className="dimension-track"><span style={{ width: `${dimension.score}%` }} /></div>
+                      <div><strong>{dimension.name}</strong><span>{dimension.score ?? "—"}</span></div>
+                      <div className="dimension-track"><span style={{ width: `${dimension.score ?? 0}%` }} /></div>
                       <small>{dimension.note}</small>
                     </div>
                   ))}
                 </div>
 
                 <div className="requirements-block">
-                  <div className="section-heading"><h3>硬性要求</h3><span>{result.requirements.filter((item) => item.status === "pass").length}/{result.requirements.length} 已覆盖</span></div>
+                  <div className="section-heading"><h3>岗位要求</h3><span>{result.requirements.filter((item) => item.status === "pass").length}/{result.requirements.length} 已覆盖</span></div>
                   <div className="requirement-list">
                     {result.requirements.map((item) => (
                       <div className={`requirement ${item.status}`} key={item.label}>
                         {item.status === "pass" ? <CheckCircle2 size={17} /> : <AlertTriangle size={17} />}
-                        <div><strong>{item.label}</strong><small>{item.evidence}</small></div>
+                        <div><strong>{item.label} <span className="requirement-importance">{item.importance === "preferred" ? "加分" : "必需"}</span></strong><small>{item.evidence}</small></div>
                       </div>
                     ))}
                   </div>
@@ -722,7 +807,7 @@ export function JobWorkspace() {
             <div className="regenerate-bar">
               <div><strong>{acceptedRevisions.length} 条建议已采纳</strong><span>重新生成时只应用已采纳内容，原始事实会保留。</span></div>
               {generatingResume ? <div className="inline-work"><PhaseGlyph icon={(["scan", "write", "check"] as const)[generationPhase]} /><span>{["整理采纳内容", "重组简历表达", "准备可编辑预览"][generationPhase]}</span></div> : null}
-              <button className="primary-button regenerate-button" type="button" disabled={!acceptedRevisions.length || editorBusy || analyzing || uploading} onClick={regenerateResume}>
+              <button className="primary-button regenerate-button" type="button" disabled={!acceptedRevisions.length || editorBusy || analyzing || uploading || !analysisComplete} onClick={regenerateResume}>
                 <span className="button-icon">{generatingResume ? <LoaderCircle className="spin" size={17} /> : <RefreshCw size={17} />}</span>
                 <span>{generatingResume ? "正在重新生成" : "重新生成简历"}</span>
                 <span className="button-icon" />
@@ -745,34 +830,37 @@ export function JobWorkspace() {
               <small>默认不保存到本机。关闭后停止更新，已保存的副本可手动清除。</small>
               <button className="text-button" type="button" onClick={() => { try { localStorage.removeItem(DRAFT_STORAGE_KEY); setSaveDraftLocally(false); setSuccessMessage("已清除本机保存的草稿，编辑区内容仍保留。"); } catch { setError("本机草稿暂时无法清除，请检查浏览器存储设置。"); } }}>清除本机草稿</button>
             </div> : null}
-            {pendingDraft ? <section className="draft-preview" aria-label="新版本对照">
-              <h3>确认后才会替换当前草稿</h3>
-              <p>新版本来源：{pendingDraft.resume.filename}。手工修改不会自动带入新版本，请先核对。</p>
+            {pendingDraft ? <section className="draft-preview" aria-label={pendingDraft.operation === "refine" ? "AI 修改预览" : "新版本对照"}>
+              <h3>{pendingDraft.complete === false ? "修改预览尚未完成，原稿保持不变" : "确认后才会替换当前草稿"}</h3>
+              <p>新版本来源：{pendingDraft.resume.filename}。请核对新增或改变的经历、技能和数字，标记只用于提示改动，不能证明内容真实。</p>
+              {pendingReview?.addedNumbers.length ? <p className="review-cue">新增数字，请核对：{pendingReview.addedNumbers.join("、")}</p> : null}
+              {pendingReview?.addedTerms.length ? <p className="review-cue">新增技术或英文术语，请核对：{pendingReview.addedTerms.join("、")}</p> : null}
               <div className="comparison-grid">
-                <div className="comparison original-copy"><span>当前草稿</span><pre>{generatedResume}</pre></div>
-                <div className="comparison revised-copy"><span>准备替换的新版本</span><pre>{pendingDraft.content}</pre></div>
+                <div className="comparison original-copy"><span>当前草稿（删除或改写行已标记）</span><pre>{pendingReview?.originalLines.map((line, index) => <span className="review-line" key={index}>{line.changed ? <mark>{line.text || " "}</mark> : line.text || " "}{"\n"}</span>)}</pre></div>
+                <div className="comparison revised-copy"><span>准备替换的新版本（新增或改写行已标记）</span><pre>{pendingReview?.lines.map((line, index) => <span className="review-line" key={index}>{line.changed ? <mark>{line.text || " "}</mark> : line.text || " "}{"\n"}</span>)}</pre></div>
               </div>
               <div className="draft-controls">
-                <button className="action-button" type="button" onClick={() => { setPendingDraft(null); setSuccessMessage("已保留当前草稿。"); }}>保留当前草稿</button>
-                <button className="action-button accept-button" type="button" onClick={() => applyDraft(pendingDraft)}>替换当前草稿</button>
+                <button className="action-button" type="button" disabled={editorBusy} onClick={() => { setPendingDraft(null); setSuccessMessage("已保留当前草稿。"); }}>保留当前草稿</button>
+                <button className="action-button accept-button" type="button" disabled={editorBusy || pendingDraft.complete === false} onClick={() => applyDraft(pendingDraft)}>替换当前草稿</button>
               </div>
             </section> : null}
             <div className="editor-grid">
               <label className="resume-document">
                 <span>可直接编辑正文</span>
-                <textarea value={generatedResume} disabled={editorBusy} onChange={(event) => setDraft((current) => current ? { ...current, content: event.target.value } : current)} aria-label="优化版简历正文" />
+                <textarea value={generatedResume} maxLength={60_000} disabled={editorBusy || Boolean(pendingDraft)} onChange={(event) => setDraft((current) => current ? { ...current, content: event.target.value } : current)} aria-label="优化版简历正文" />
               </label>
               <aside className="ai-refine-panel">
                 <div><MessageSquare size={18} /><strong>继续让 AI 修改</strong></div>
-                <p>点名某一段时只改该段；明确说“整体调整”时才会修改全文。</p>
+                <p>点名某一段时只改该段；明确说“整体调整”时才会修改全文。草稿和修改要求会发送给模型服务，返回结果先供预览，确认后才替换原稿。</p>
                 {refiningResume ? <div className="inline-work refine-work"><PhaseGlyph icon={(["scan", "write", "check"] as const)[refinePhase]} /><span>{["读取当前版本", "按要求修改段落", "检查事实一致性"][refinePhase]}</span></div> : null}
                 <form onSubmit={refineGeneratedResume}>
-                  <textarea value={aiInstruction} disabled={editorBusy} onChange={(event) => setAiInstruction(event.target.value)} placeholder="例如：把第二段写得更简洁，保留所有数据" aria-label="AI 修改要求" />
+                  <textarea value={aiInstruction} maxLength={2000} disabled={editorBusy} onChange={(event) => setAiInstruction(event.target.value)} placeholder="例如：把第二段写得更简洁，保留所有数据" aria-label="AI 修改要求" />
                   <button className="primary-button" type="submit" disabled={!generatedResume.trim() || !aiInstruction.trim() || editorBusy || Boolean(pendingDraft)}>
                     <span className="button-icon">{refiningResume ? <LoaderCircle className="spin" size={17} /> : <Sparkles size={17} />}</span>
                     <span>{refiningResume ? "正在修改" : "应用 AI 修改"}</span>
                     <span className="button-icon" />
                   </button>
+                  {refiningResume ? <button className="text-button" type="button" onClick={() => refineAbortRef.current?.abort()}>取消 AI 修改</button> : null}
                 </form>
                 <div className="download-actions">
                   <button className="action-button" type="button" disabled={Boolean(exporting) || editorBusy || !generatedResume.trim()} onClick={() => downloadResume("docx")}><Download size={16} />{exporting === "docx" ? "生成中" : "下载 DOCX"}</button>

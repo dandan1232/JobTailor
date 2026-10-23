@@ -1,5 +1,6 @@
 import mammoth from "mammoth";
 import { PDFParse } from "pdf-parse";
+import { withApiProtection } from "@/lib/api-protection";
 
 export const runtime = "nodejs";
 const MAX_RESUME_BYTES = 5 * 1024 * 1024;
@@ -11,6 +12,10 @@ class ResumeParseError extends Error {
 }
 
 export async function POST(request: Request) {
+  return withApiProtection(request, "extract", extractResume);
+}
+
+async function extractResume(request: Request) {
   try {
     const formData = await request.formData();
     const file = formData.get("file");

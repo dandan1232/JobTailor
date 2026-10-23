@@ -499,6 +499,14 @@ summary:focus-visible {
 .draft-preview h3 { margin-top: 0; font-size: 0.94rem; }
 .draft-preview pre, .draft-context pre { max-height: 20rem; overflow: auto; margin: 0; white-space: pre-wrap; overflow-wrap: anywhere; font: inherit; font-size: 0.75rem; line-height: 1.7; }
 .draft-preview .draft-controls { justify-content: flex-end; margin-top: 0.8rem; }
+.privacy-details { margin-top: 1rem; color: var(--ink-600); font-size: 0.75rem; line-height: 1.7; }
+.privacy-details summary { cursor: pointer; font-weight: 700; }
+.privacy-details p { margin: 0.6rem 0 0; }
+.scope-note { padding: 0.75rem; border: 1px solid var(--line); color: var(--ink-600); font-size: 0.75rem; line-height: 1.7; }
+.requirement-importance { color: var(--ink-500); font-size: 0.65rem; font-weight: 500; }
+.draft-preview .review-line { display: inline; margin: 0; color: var(--ink-600); font: inherit; }
+.review-line mark { background: var(--warning-100); color: var(--ink-950); }
+.draft-preview .review-cue { overflow-wrap: anywhere; font-weight: 600; }
 .editor-grid { display: grid; grid-template-columns: minmax(0, 1fr) 20rem; gap: 1.25rem; }
 .resume-document { display: grid; gap: 0.55rem; }
 .resume-document > span { color: var(--ink-500); font-size: 0.7rem; font-weight: 700; }

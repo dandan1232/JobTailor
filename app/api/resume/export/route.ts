@@ -2,6 +2,7 @@ import { Document, Packer, Paragraph, TextRun } from "docx";
 import PDFDocument from "pdfkit";
 import { readFile } from "node:fs/promises";
 import { join } from "node:path";
+import { readJsonObject, validText, withApiProtection } from "@/lib/api-protection";
 
 export const runtime = "nodejs";
 
@@ -10,10 +11,16 @@ function safeName(name: string) {
 }
 
 export async function POST(request: Request) {
+  return withApiProtection(request, "export", exportResume);
+}
+
+async function exportResume(request: Request) {
+  const body = await readJsonObject(request);
+  if (!validText(body.content, 60_000)) return Response.json({ detail: "导出内容不能为空，且不能超过 60000 字。" }, { status: 422 });
+  if (body.format !== "docx" && body.format !== "pdf") return Response.json({ detail: "导出格式仅支持 PDF 或 DOCX。" }, { status: 422 });
+  if (body.filename !== undefined && (typeof body.filename !== "string" || body.filename.length > 200)) return Response.json({ detail: "文件名必须是 200 字以内的文字。" }, { status: 422 });
   try {
-    const body = await request.json() as { content?: string; format?: "docx" | "pdf"; filename?: string };
-    const content = body.content?.trim();
-    if (!content || !body.format) return Response.json({ detail: "缺少导出内容或格式" }, { status: 422 });
+    const content = body.content.trim();
     const lines = content.split(/\r?\n/);
     const base = safeName(body.filename ?? "简历");
 
