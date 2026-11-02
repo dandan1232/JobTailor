@@ -583,10 +583,10 @@ export function JobWorkspace() {
   }
 
   return (
-    <div className="app-shell">
+    <div className="app-shell workspace-shell" id="workspace">
       <aside className={`sidebar ${mobileNavOpen ? "sidebar-open" : ""}`}>
         <div className="brand-row">
-          <div className="brand-mark" aria-hidden="true">JT</div>
+          <div className="brand-mark" aria-hidden="true"><span className="tailor-symbol"><i /><i /><i /></span></div>
           <div>
             <strong>JobTailor</strong>
             <span>简历诊断工作台</span>
@@ -619,14 +619,14 @@ export function JobWorkspace() {
 
       {mobileNavOpen ? <button className="nav-backdrop" aria-label="关闭导航" onClick={() => setMobileNavOpen(false)} /> : null}
 
-      <main className="workspace">
+      <main className="workspace" id="workspace-main" tabIndex={-1}>
         <header className="topbar">
           <button className="icon-button menu-button" type="button" aria-label="打开导航" onClick={() => setMobileNavOpen(true)}>
             <Menu size={20} />
           </button>
           <div>
-            <p className="eyebrow">AI 简历诊断</p>
-            <h1>让简历对准岗位，而不是堆关键词</h1>
+            <p className="eyebrow">你的下一步，从这里开始</p>
+            <h2 className="workspace-title">让简历对准岗位，而不是堆关键词</h2>
           </div>
           <div className="privacy-state"><ShieldCheck size={15} /> 原文件仅在内存解析</div>
         </header>

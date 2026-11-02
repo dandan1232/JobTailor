@@ -1,5 +1,36 @@
 import { expect, test, type Page } from "@playwright/test";
 
+test("landing links reach the workspace below the fixed navigation", async ({ page }, testInfo) => {
+  await page.setViewportSize({ width: 1440, height: 1100 });
+  await page.goto("/");
+  await expect(page.getByRole("heading", { level: 1 })).toHaveText("你的经历，值得更好的表达。");
+  await page.screenshot({ path: testInfo.outputPath("landing-desktop.png") });
+  await page.getByRole("link", { name: "开始优化简历", exact: true }).click();
+  await expect(page).toHaveURL(/#workspace$/);
+  await expect.poll(() => page.locator("#workspace").evaluate((element) => Math.round(element.getBoundingClientRect().top))).toBe(108);
+  await page.getByRole("button", { name: "载入示例" }).click();
+  await expect(page.getByRole("button", { name: "开始匹配分析" })).toBeEnabled();
+  await page.screenshot({ path: testInfo.outputPath("workspace-dark.png") });
+});
+
+test("landing and mobile navigation stay usable at narrow widths with reduced motion", async ({ page }, testInfo) => {
+  await page.emulateMedia({ reducedMotion: "reduce" });
+  for (const width of [320, 390, 768]) {
+    await page.setViewportSize({ width, height: 844 });
+    await page.goto("/");
+    expect(await page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth)).toBe(true);
+    await expect(page.getByRole("link", { name: "开始优化简历", exact: true })).toBeInViewport();
+    if (width === 390) await page.screenshot({ path: testInfo.outputPath("landing-mobile.png") });
+    await page.getByRole("link", { name: "开始优化简历", exact: true }).click();
+    await expect(page.getByRole("button", { name: "打开导航" })).toBeInViewport();
+    await page.getByRole("button", { name: "打开导航" }).click();
+    await expect(page.getByRole("navigation", { name: "分析步骤" })).toBeInViewport();
+    await page.getByRole("button", { name: "关闭导航", exact: true }).first().click();
+    await expect(page.locator(".sidebar")).not.toBeInViewport();
+    expect(await page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth)).toBe(true);
+  }
+});
+
 async function generateSampleDraft(page: Page) {
   await page.goto("/");
   await page.getByRole("button", { name: "载入示例" }).click();

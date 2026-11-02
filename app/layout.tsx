@@ -3,6 +3,7 @@ import "@fontsource/noto-sans-sc/400.css";
 import "@fontsource/noto-sans-sc/500.css";
 import "@fontsource/noto-sans-sc/700.css";
 import "./globals.css";
+import "./landing.css";
 
 export const metadata: Metadata = {
   title: "JobTailor | 岗位定制工作台",
@@ -13,7 +14,7 @@ export const viewport: Viewport = {
   width: "device-width",
   initialScale: 1,
   viewportFit: "cover",
-  themeColor: "#eef2f5",
+  themeColor: "#0c1019",
 };
 
 export default function RootLayout({ children }: Readonly<{ children: React.ReactNode }>) {
